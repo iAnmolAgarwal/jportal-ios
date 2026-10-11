@@ -29,10 +29,10 @@ function tick(t) {
 }
 
 /**
- * ring({ percent, target, size = 56, stroke = 6, shortfall = false, animate = true }, ...centerChildren)
+ * ring({ percent, target, size = 56, stroke = 6, shortfall = false, animate = true, fill = true }, ...centerChildren)
  * colour: primary when >= target, warn within 10 below, error further below.
  */
-export function ring({ percent, target = 75, size = 56, stroke = 6, shortfall = false, animate = true }, ...center) {
+export function ring({ percent, target = 75, size = 56, stroke = 6, shortfall = false, animate = true, fill = true }, ...center) {
   const pct = Math.max(0, Math.min(100, Number(percent) || 0));
   const safe = pct >= target;
   const color = safe ? 'var(--primary)' : pct >= target - 10 ? 'var(--warn)' : 'var(--error)';
@@ -52,7 +52,8 @@ export function ring({ percent, target = 75, size = 56, stroke = 6, shortfall = 
   };
 
   let shown = 0;
-  const born = performance.now();
+  // fill: false skips the first-fill ease, for rings rebuilt on a refresh
+  const born = performance.now() - (fill ? 0 : 1000);
   const draw = (t) => {
     // first fill eases in over ~700ms
     const k = Math.min(1, (t - born) / 700);
@@ -61,7 +62,9 @@ export function ring({ percent, target = 75, size = 56, stroke = 6, shortfall = 
     if (shown < 0.999) {
       const ts = start + sweep + (shown > 0.001 ? gap : 0);
       const te = start + 2 * Math.PI - (shown > 0.001 ? gap : 0);
-      track.setAttribute('d', te > ts ? arcPath(ts, te) : '');
+      // a whole-circle track can't be one svg arc (same start and end point), draw two halves
+      const whole = te - ts > 2 * Math.PI - 0.001;
+      track.setAttribute('d', whole ? arcPath(start, start + Math.PI) + arcPath(start + Math.PI, start + 2 * Math.PI - 0.0001).replace('M', 'L') : te > ts ? arcPath(ts, te) : '');
     } else track.setAttribute('d', '');
     if (shown <= 0.001) { arc.setAttribute('d', ''); return; }
     const waves = Math.max(8, (2 * Math.PI * r) / (stroke * 4.6));

@@ -177,7 +177,8 @@ export const api = {
     post('/StudentClassAttendance/getstudentsubjectpersentage', {
       instituteid: iid(), subjectid: subject.subjectid, registrationid: sem.registrationid,
       cmpidkey: components.map((c) => ({ subjectcomponentid: c })),
-      subjectcode: subject.subjectcode, registrationcode: sem.registrationcode,
+      // a raw attendance row's subjectcode is "NAME(CODE)", the portal wants the bare code
+      subjectcode: subject.individualsubjectcode || subject.subjectcode, registrationcode: sem.registrationcode,
     }, enc)),
 
   // subjects

@@ -23,7 +23,7 @@ const jobs = [
   { ...common, entryPoints: ['src/preview.js'], outfile: 'dist/preview.js', format: 'esm' },
 ];
 fs.mkdirSync('dist', { recursive: true });
-fs.writeFileSync('dist/preview.html', `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>JPortal preview</title>
+fs.writeFileSync('dist/preview.html', `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>JPortal preview</title><link rel="icon" href="data:,">
 <style>@font-face{font-family:'JP Sans Flex';src:url(../src/assets/sans_flex.ttf) format('truetype');font-weight:100 1000}body{margin:0}</style></head><body><script type="module" src="preview.js"></script></body></html>`);
 fs.writeFileSync('dist/frame.html', `<!doctype html><html><head><meta charset="utf-8"><style>html,body{margin:0;background:#888}iframe{border:0;width:390px;display:block}</style></head><body><script>const f=document.createElement('iframe');f.style.height=(new URLSearchParams(location.search).get('h')||844)+'px';f.src='preview.html'+location.search;document.body.append(f)</script></body></html>`);
 if (watch) {
