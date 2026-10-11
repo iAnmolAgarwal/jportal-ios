@@ -79,8 +79,35 @@ async function unwrap(res) {
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const transient = (e) => ['unavailable', 'empty', 'network'].includes(e.kind);
 
+/**
+ * what the portal does on a 401: ask to extend the session, then retry with the
+ * same token. one attempt in flight at a time.
+ */
+let refreshing = null;
+async function refreshSession() {
+  if (globalThis.__JP_PREVIEW__) return false;
+  refreshing ??= (async () => {
+    try {
+      const tokendate = localStorage.getItem('tokendate') || sessionStorage.getItem('tokendate') || '';
+      const res = await unwrap(await exchange('/token/refreshTokenRequest', 'POST',
+        JSON.stringify({ username: session()?.username || '', tokendate })));
+      return res?.msg === 'Success';
+    } catch { return false; } finally { setTimeout(() => { refreshing = null; }, 0); }
+  })();
+  return refreshing;
+}
+
 /** posts and unwraps, retrying the gateway's odd dropped request. pass retry=false for writes */
-export async function post(path, payload, { encrypted = false, retry = true } = {}) {
+export async function post(path, payload, opts = {}) {
+  try {
+    return await postOnce(path, payload, opts);
+  } catch (e) {
+    if (e instanceof PortalError && e.kind === 'expired' && await refreshSession()) return postOnce(path, payload, opts);
+    throw e;
+  }
+}
+
+async function postOnce(path, payload, { encrypted = false, retry = true } = {}) {
   const delays = retry ? [500, 1500] : [];
   for (let attempt = 0; ; attempt++) {
     try {

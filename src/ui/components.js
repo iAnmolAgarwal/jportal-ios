@@ -143,13 +143,19 @@ export function emptyState(title, body, action) {
     action || null);
 }
 
+/** drop the dead token so the portal shows its google button; jportal comes back after sign-in */
+function signInAgain() {
+  try { localStorage.setItem('Token', ''); } catch {}
+  location.href = '/studentportal/';
+}
+
 export function errorState(err, retry) {
   const expired = err?.kind === 'expired';
   return emptyState(
     expired ? 'Signed out' : "Couldn't load this",
     expired ? 'Your portal session ran out. Sign in again on the portal.' : (err?.message || String(err)),
     expired
-      ? h('button', { class: 'btn', onclick: () => { location.href = '/studentportal/'; } }, 'Sign in')
+      ? h('button', { class: 'btn', onclick: signInAgain }, 'Sign in')
       : retry ? h('button', { class: 'btn tonal', onclick: retry }, icon('refresh', 18), 'Retry') : null);
 }
 

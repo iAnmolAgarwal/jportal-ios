@@ -1,0 +1,29 @@
+JPortal for iOS (unofficial companion userscript)
+Copyright (C) 2026 Anmol Agarwal
+Licensed under the GNU General Public License v3.0 only, see LICENSE.
+
+This is a web port of JPortal for Android
+(https://github.com/codelif/jportal-android), Copyright (C) 2026 Harsh Sharma
+(codelif), GPL-3.0-only. Its screens, copy, colours, icons and attendance maths
+are carried over here. The portal client (request crypto, endpoints, marks PDF
+parser) is ported from ktjiit (https://github.com/codelif/ktjiit) by the same
+author.
+
+Based on JPortal (https://github.com/codeblech/jportal) by Yash Malik
+(codeblech), whose design and spirit both apps carry forward.
+
+Portions of the protocol knowledge (endpoint names, payload shapes, the
+LocalName and AES scheme) are derived from:
+
+  jsjiit, Copyright (c) codeblech, ISC License
+  https://github.com/codeblech/jsjiit
+
+  pyjiit, Copyright (c) 2024 Harsh Sharma, MIT License
+  https://github.com/codelif/pyjiit
+
+Google Sans Flex is bundled under the SIL Open Font License 1.1, see
+licenses/OFL-google-sans-flex.txt.
+
+Material Symbols icons by Google, Apache License 2.0.
+
+Unofficial. Not affiliated with or endorsed by JIIT.
