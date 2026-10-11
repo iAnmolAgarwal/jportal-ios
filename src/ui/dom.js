@@ -45,15 +45,8 @@ export function render(el, ...children) {
 /** escape for the rare innerHTML use */
 export const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
-/** "COMPILER DESIGN" -> "Compiler Design", keeping short all-caps words like ML, AI, II */
-export function titleCase(s) {
-  const small = new Set(['and', 'of', 'in', 'for', 'the', 'to', 'on', 'with', 'a', 'an', '&']);
-  return String(s ?? '').trim().toLowerCase().split(/\s+/).map((w, i) => {
-    if (/^(i{1,3}|iv|vi{0,3}|ix|x)$/.test(w)) return w.toUpperCase();
-    if (i > 0 && small.has(w)) return w;
-    return w.replace(/(^|[-(/])([a-z])/g, (m, p, c) => p + c.toUpperCase());
-  }).join(' ');
-}
+/** "COMPILER DESIGN" -> "Compiler Design", the android app's rules (acronyms like IOT, II kept) */
+export { titleCase } from '../domain/attendance.js';
 
 /** "2026ODDSEM" -> "Odd 2026", "2026EVESEM" -> "Even 2026" */
 export function semLabel(code) {

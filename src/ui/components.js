@@ -148,7 +148,13 @@ export function emptyState(title, body, action) {
 
 /** drop the dead token so the portal shows its google button; jportal comes back after sign-in */
 function signInAgain() {
-  try { localStorage.setItem('Token', ''); } catch {}
+  try {
+    localStorage.setItem('Token', '');
+    // our copy of the dead session too, or jportal would mount right back over the sign-in page
+    const cap = JSON.parse(localStorage.getItem('jp:login') || '{}');
+    delete cap.token;
+    localStorage.setItem('jp:login', JSON.stringify(cap));
+  } catch {}
   location.href = '/studentportal/';
 }
 

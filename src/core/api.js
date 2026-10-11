@@ -4,7 +4,7 @@
 // bundle, don't "fix" them. every method resolves to the envelope's `response`.
 
 import { encrypt, localName, dateSeq } from './crypto.js';
-import { session } from './session.js';
+import { session, tokenDate } from './session.js';
 
 export const BASE = 'https://webportal.jiit.ac.in:6011/StudentPortalAPI';
 
@@ -88,7 +88,7 @@ async function refreshSession() {
   if (globalThis.__JP_PREVIEW__) return false;
   refreshing ??= (async () => {
     try {
-      const tokendate = localStorage.getItem('tokendate') || sessionStorage.getItem('tokendate') || '';
+      const tokendate = tokenDate();
       const res = await unwrap(await exchange('/token/refreshTokenRequest', 'POST',
         JSON.stringify({ username: session()?.username || '', tokendate })));
       return res?.msg === 'Success';

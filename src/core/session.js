@@ -14,8 +14,34 @@ export function installLoginHook(win = window) {
     try {
       const r = JSON.parse(text)?.response;
       const res = r?.regdata || r;
-      if (res?.token) win.localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now() }));
+      // tokendate: refreshTokenRequest wants the login moment back as new Date().toString()
+      if (res?.token) win.localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now(), tokendate: new Date().toString() }));
     } catch {}
+  };
+  // the portal's sign-in page runs localStorage.clear() on every load. keep our jp:* keys
+  // (cache, settings, the captured session) through it; signOut() removes them on purpose.
+  const S = win.Storage.prototype;
+  const clear = S.clear;
+  S.clear = function () {
+    if (this !== win.localStorage || win.__jpWipe) return clear.call(this);
+    const kept = [];
+    for (let i = 0; i < this.length; i++) {
+      const k = this.key(i);
+      if (k && k.startsWith('jp:')) kept.push([k, this.getItem(k)]);
+    }
+    clear.call(this);
+    for (const [k, v] of kept) this.setItem(k, v);
+  };
+  // the portal writes Token on login and after a refresh; keep our copy in step
+  const setItem = S.setItem;
+  S.setItem = function (k, v) {
+    setItem.call(this, k, v);
+    if (this === win.localStorage && k === 'Token' && v) {
+      try {
+        const cap = JSON.parse(this.getItem(CAPTURE) || '{}');
+        if (cap.token !== v) setItem.call(this, CAPTURE, JSON.stringify({ ...cap, token: v }));
+      } catch {}
+    }
   };
   const XHR = win.XMLHttpRequest.prototype;
   const open = XHR.open, send = XHR.send;
@@ -41,10 +67,13 @@ const ls = (k) => { try { return localStorage.getItem(k) || ''; } catch { return
  */
 export function session() {
   if (globalThis.__JP_PREVIEW__) return globalThis.__JP_PREVIEW__.session;
-  const token = ls('Token');
-  if (!token) return null;
   let cap = {};
   try { cap = JSON.parse(ls(CAPTURE) || '{}'); } catch {}
+  // the portal wipes its own Token whenever its sign-in page loads; our copy keeps us
+  // signed in until the jwt actually runs out, like the android app's stored session
+  const live = ls('Token');
+  const token = live || (cap.token && !jwtExpired(cap.token) ? cap.token : '');
+  if (!token) return null;
   // a capture from an older login is still good for the member id, it doesn't change
   return {
     token,
@@ -58,6 +87,22 @@ export function session() {
     name: ls('name') || cap.name || '',
     memberType: ls('membertype') || cap.membertype || '',
   };
+}
+
+function jwtClaims(t) {
+  try { return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
+}
+/** past its exp claim, by the portal's (slow) clock. a token without exp counts as live */
+function jwtExpired(t) {
+  const exp = jwtClaims(t)?.exp;
+  if (!exp) return false;
+  const skew = Number(ls('jp:skew') || 0);
+  return exp * 1000 < Date.now() + skew;
+}
+
+/** the moment of login as the portal formats it, for refreshTokenRequest */
+export function tokenDate() {
+  try { return ls('tokendate') || sessionStorage.getItem('tokendate') || JSON.parse(ls(CAPTURE) || '{}').tokendate || ''; } catch { return ''; }
 }
 
 /** seconds-since-epoch exp claim of the jwt, or null */
@@ -76,6 +121,11 @@ export const signedIn = () => !!session()?.token;
 
 /** what the portal's own logout does, then back to its sign-in page */
 export function signOut() {
-  try { localStorage.clear(); sessionStorage.clear(); } catch {}
+  try {
+    window.__jpWipe = true;
+    localStorage.clear();
+    Object.keys(localStorage).filter((k) => k.startsWith('jp:')).forEach((k) => localStorage.removeItem(k));
+    sessionStorage.clear();
+  } catch {}
   location.href = '/studentportal/';
 }

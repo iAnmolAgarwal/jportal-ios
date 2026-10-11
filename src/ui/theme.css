@@ -127,7 +127,7 @@ input, select { font: inherit; color: inherit; }
 .chip select { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; -webkit-appearance: none; appearance: none; cursor: pointer; font-size: 16px; }
 
 /* segmented buttons, as on the academics tab */
-.seg { display: flex; border: 1px solid var(--outline); border-radius: 999px; overflow: hidden; height: 48px; }
+.seg { display: flex; border: 1px solid var(--outline); border-radius: 999px; overflow: hidden; height: 40px; }
 .seg button { flex: 1; font-weight: 600; font-size: 15px; border-left: 1px solid var(--outline); }
 .seg button:first-child { border-left: 0; }
 .seg button[aria-selected=true] { background: var(--secondary-container); color: var(--on-secondary-container); }
@@ -141,12 +141,14 @@ input, select { font: inherit; color: inherit; }
 .iconbtn:active { background: var(--sc-high); }
 
 /* list rows inside a group card */
-.group { background: var(--sc-low); border-radius: var(--r-lg); overflow: hidden; }
+.group { display: flex; flex-direction: column; gap: 2px; }
+.group > * { background: var(--sc-low); border-radius: 4px; }
+.group > :first-child { border-top-left-radius: var(--r-md); border-top-right-radius: var(--r-md); }
+.group > :last-child { border-bottom-left-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
 .group > .item { display: flex; align-items: center; gap: 16px; padding: 14px 16px; min-height: 56px; }
-.group > .item + .item { border-top: 1px solid var(--outline-variant); }
 .group > .item.tap:active { background: var(--sc-high); }
 .kv { display: flex; justify-content: space-between; gap: 16px; padding: 12px 16px; }
-.kv + .kv { border-top: 1px solid var(--outline-variant); }
+.group > .kv { border-radius: 4px; }
 .kv .k { color: var(--on-surface-variant); }
 .kv .v { text-align: right; font-weight: 600; }
 

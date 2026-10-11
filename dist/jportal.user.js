@@ -21,15 +21,38 @@
       try {
         const r = JSON.parse(text)?.response;
         const res = r?.regdata || r;
-        if (res?.token) win.localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now() }));
+        if (res?.token) win.localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now(), tokendate: (/* @__PURE__ */ new Date()).toString() }));
       } catch {
       }
     };
+    const S2 = win.Storage.prototype;
+    const clear = S2.clear;
+    S2.clear = function() {
+      if (this !== win.localStorage || win.__jpWipe) return clear.call(this);
+      const kept = [];
+      for (let i = 0; i < this.length; i++) {
+        const k = this.key(i);
+        if (k && k.startsWith("jp:")) kept.push([k, this.getItem(k)]);
+      }
+      clear.call(this);
+      for (const [k, v] of kept) this.setItem(k, v);
+    };
+    const setItem = S2.setItem;
+    S2.setItem = function(k, v) {
+      setItem.call(this, k, v);
+      if (this === win.localStorage && k === "Token" && v) {
+        try {
+          const cap = JSON.parse(this.getItem(CAPTURE) || "{}");
+          if (cap.token !== v) setItem.call(this, CAPTURE, JSON.stringify({ ...cap, token: v }));
+        } catch {
+        }
+      }
+    };
     const XHR = win.XMLHttpRequest.prototype;
-    const open = XHR.open, send = XHR.send;
+    const open2 = XHR.open, send = XHR.send;
     XHR.open = function(m, u) {
       this.__jpu = u;
-      return open.apply(this, arguments);
+      return open2.apply(this, arguments);
     };
     XHR.send = function() {
       if (hit(this.__jpu)) this.addEventListener("load", () => keep(this.responseText));
@@ -52,13 +75,14 @@
   };
   function session() {
     if (globalThis.__JP_PREVIEW__) return globalThis.__JP_PREVIEW__.session;
-    const token = ls("Token");
-    if (!token) return null;
     let cap = {};
     try {
       cap = JSON.parse(ls(CAPTURE) || "{}");
     } catch {
     }
+    const live = ls("Token");
+    const token = live || (cap.token && !jwtExpired(cap.token) ? cap.token : "");
+    if (!token) return null;
     return {
       token,
       username: ls("Username") || cap.Username || "",
@@ -72,7 +96,195 @@
       memberType: ls("membertype") || cap.membertype || ""
     };
   }
+  function jwtClaims(t) {
+    try {
+      return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
+    } catch {
+      return null;
+    }
+  }
+  function jwtExpired(t) {
+    const exp = jwtClaims(t)?.exp;
+    if (!exp) return false;
+    const skew2 = Number(ls("jp:skew") || 0);
+    return exp * 1e3 < Date.now() + skew2;
+  }
+  function tokenDate() {
+    try {
+      return ls("tokendate") || sessionStorage.getItem("tokendate") || JSON.parse(ls(CAPTURE) || "{}").tokendate || "";
+    } catch {
+      return "";
+    }
+  }
   var signedIn = () => !!session()?.token;
+  function signOut() {
+    try {
+      window.__jpWipe = true;
+      localStorage.clear();
+      Object.keys(localStorage).filter((k) => k.startsWith("jp:")).forEach((k) => localStorage.removeItem(k));
+      sessionStorage.clear();
+    } catch {
+    }
+    location.href = "/studentportal/";
+  }
+
+  // src/domain/attendance.js
+  var subjectCode = (row) => String(row?.individualsubjectcode ?? "").trim();
+  function subjectName(row) {
+    const title = String(row?.subjectcode ?? "");
+    const raw = String(row?.individualsubjectcode ?? "");
+    for (const c of [raw, raw.trim()]) {
+      const suffix = `(${c})`;
+      if (c && title.endsWith(suffix)) return title.slice(0, -suffix.length).trim() || title;
+    }
+    return title.replace(/\([^()]*\)\s*$/, "").trim() || title;
+  }
+  var num = (v) => v == null || v === "" || Number.isNaN(Number(v)) ? null : Number(v);
+  var has = (v) => v != null;
+  var componentIds = (row) => [row?.Lsubjectcomponentid, row?.Tsubjectcomponentid, row?.Psubjectcomponentid].filter((c) => c != null && c !== "");
+  function componentTags(row) {
+    return [
+      has(row?.Lsubjectcomponentid) ? ["L", num(row.Lpercentage)] : null,
+      has(row?.Tsubjectcomponentid) ? ["T", num(row.Tpercentage)] : null,
+      has(row?.Psubjectcomponentid) ? ["P", num(row.Ppercentage)] : null
+    ].filter(Boolean);
+  }
+  function portalPercent(row) {
+    if (has(row?.Lsubjectcomponentid) || has(row?.Tsubjectcomponentid)) return num(row.LTpercantage) ?? num(row.Lpercentage);
+    return num(row?.Ppercentage);
+  }
+  var SHAPE = /(\d{2})\/(\d{2})\/(\d{4})\s*\((\d{1,2}):(\d{2}):?\s*([AP]M)\s*-\s*(\d{1,2}):(\d{2}):?\s*([AP]M)\)/i;
+  var DATE_ONLY = /^(\d{2})\/(\d{2})\/(\d{4})/;
+  function validDate(d, m, y) {
+    const dt = new Date(Date.UTC(+y, +m - 1, +d));
+    return dt.getUTCFullYear() === +y && dt.getUTCMonth() === +m - 1 && dt.getUTCDate() === +d ? `${y}-${m}-${d}` : null;
+  }
+  function minutes(h2, m, ap) {
+    let hh = +h2;
+    if (hh < 1 || hh > 12 || +m > 59) return null;
+    if (ap.toUpperCase() === "AM") hh %= 12;
+    else hh = hh % 12 + 12;
+    return hh * 60 + +m;
+  }
+  function parseClass(c) {
+    const datetime = String(c?.datetime ?? "");
+    let date = null, start2 = null, end = null;
+    const m = SHAPE.exec(datetime);
+    if (m) {
+      date = validDate(m[1], m[2], m[3]);
+      if (date) {
+        start2 = minutes(m[4], m[5], m[6]);
+        end = minutes(m[7], m[8], m[9]);
+      }
+    } else {
+      const d = DATE_ONLY.exec(datetime.slice(0, 10));
+      if (d) date = validDate(d[1], d[2], d[3]);
+    }
+    return {
+      datetime,
+      date,
+      start: start2,
+      end,
+      present: String(c?.present ?? "").toLowerCase() === "present",
+      // the portal leaves these out of the class count, so only a present one moves the percentage
+      extra: String(c?.classtype ?? "").toLowerCase() === "extra",
+      takenBy: String(c?.attendanceby ?? ""),
+      classType: String(c?.classtype ?? ""),
+      status: String(c?.attendancestatus ?? "")
+    };
+  }
+  var classesOf = (daily) => (daily?.studentAttdsummarylist || []).map(parseClass);
+  function chronological(classes) {
+    return classes.filter((c) => c.date).sort((a, b) => a.date < b.date ? -1 : a.date > b.date ? 1 : (a.start ?? -1) - (b.start ?? -1));
+  }
+  var tallyOf = (attended, total) => ({ attended, total });
+  var percentOf = (t) => t.total === 0 ? 0 : t.attended * 100 / t.total;
+  function canMiss(t, target) {
+    if (target <= 0 || t.total === 0) return 0;
+    return Math.max(0, Math.floor((100 * t.attended - target * t.total) / target));
+  }
+  function mustAttend(t, target) {
+    if (target >= 100) return t.attended < t.total ? Infinity : 0;
+    return Math.max(0, Math.ceil((target * t.total - 100 * t.attended) / (100 - target)));
+  }
+  var tally = (classes) => tallyOf(classes.filter((c) => c.present).length, classes.filter((c) => !c.extra).length);
+  function drift(server, classes) {
+    const t = tally(classes);
+    if (server == null || t.total === 0) return null;
+    const d = percentOf(t) - server;
+    return Math.abs(d) > 0.1 ? d : null;
+  }
+  function calendar(classes) {
+    const days = /* @__PURE__ */ new Map();
+    for (const c of classes) {
+      if (!c.date) continue;
+      const d = days.get(c.date) || { n: 0, p: 0 };
+      d.n++;
+      if (c.present) d.p++;
+      days.set(c.date, d);
+    }
+    const out = /* @__PURE__ */ new Map();
+    for (const [k, { n, p }] of days) out.set(k, p === n ? "present" : p === 0 ? "absent" : "mixed");
+    return out;
+  }
+  function trend(classes) {
+    let present = 0, regular = 0;
+    const out = [];
+    for (const c of chronological(classes)) {
+      if (c.present) present++;
+      if (!c.extra) regular++;
+      if (regular > 0) out.push([c.date, present * 100 / regular]);
+    }
+    return out;
+  }
+  var ROMAN = /^(i{1,3}|iv|v|vi{0,3}|ix|x)(-\w+)?$/i;
+  var CONSONANTS = /^[B-DF-HJ-NP-TV-XZ]{3,}$/;
+  var ACRONYMS = /* @__PURE__ */ new Set(["IOT"]);
+  var SMALL = /* @__PURE__ */ new Set(["And", "Of", "The", "For", "In", "To", "Using", "A", "An", "Or", "Nor", "But", "Yet", "So"]);
+  var titled = /* @__PURE__ */ new Map();
+  function titleCase(s) {
+    s = String(s ?? "");
+    if (titled.has(s)) return titled.get(s);
+    const out = s.split(" ").map((w) => {
+      const core = w.replace(/^[^\p{L}]+|[^\p{L}]+$/gu, "");
+      if (!w) return w;
+      if (ROMAN.test(w)) return w.toUpperCase();
+      if (new RegExp("\\p{Ll}", "u").test(w)) return w;
+      if (ACRONYMS.has(core) || CONSONANTS.test(core)) return w;
+      const t = w.toLowerCase().replace(/^./, (c) => c.toUpperCase());
+      return SMALL.has(t) ? t.toLowerCase() : t;
+    }).join(" ").replace(/^./, (c) => c.toUpperCase());
+    titled.set(s, out);
+    return out;
+  }
+  function nameCase(s) {
+    s = String(s ?? "").trim();
+    let out = "";
+    for (let i = 0; i < s.length; i++) {
+      const c = s[i];
+      if (/\s/.test(c)) {
+        if (!/\s/.test(s[i - 1])) out += " ";
+      } else out += i === 0 || !new RegExp("\\p{L}", "u").test(s[i - 1]) ? c.toUpperCase() : c.toLowerCase();
+    }
+    return out;
+  }
+  var DOW = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  var MON = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var ymd = (iso) => iso.split("-").map(Number);
+  function dayLabel(iso) {
+    const [y, m, d] = ymd(iso);
+    return `${DOW[new Date(Date.UTC(y, m - 1, d)).getUTCDay()]}, ${d} ${MON[m - 1]}`;
+  }
+  function timeLabel(min) {
+    if (min == null) return null;
+    const h2 = Math.floor(min / 60), m = min % 60;
+    return `${h2 % 12 || 12}:${String(m).padStart(2, "0")} ${h2 < 12 ? "AM" : "PM"}`;
+  }
+  function isoDay(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
 
   // src/ui/dom.js
   var SVG_NS = "http://www.w3.org/2000/svg";
@@ -105,6 +317,11 @@
     el.replaceChildren();
     append(el, children);
     return el;
+  }
+  function semLabel(code) {
+    const m = /^(\d{4})(ODD|EVE)SEM$/i.exec(code || "");
+    if (!m) return code || "";
+    return `${m[2].toUpperCase() === "ODD" ? "Odd" : "Even"} ${m[1]}`;
   }
 
   // src/ui/icons.js
@@ -170,6 +387,50 @@
   };
 
   // src/core/store.js
+  var P = "jp:cache:";
+  function read(key2) {
+    try {
+      return JSON.parse(localStorage.getItem(P + key2) || "null");
+    } catch {
+      return null;
+    }
+  }
+  function write(key2, data) {
+    try {
+      localStorage.setItem(P + key2, JSON.stringify({ at: Date.now(), data }));
+    } catch {
+    }
+  }
+  async function cached(key2, load2, onData, { maxAge = 0 } = {}) {
+    const hit = read(key2);
+    if (hit) onData(hit.data, { at: hit.at, fresh: false });
+    if (hit && maxAge && Date.now() - hit.at < maxAge) return hit.data;
+    try {
+      const data = await load2();
+      write(key2, data);
+      onData(data, { at: Date.now(), fresh: true });
+      return data;
+    } catch (e) {
+      if (hit) {
+        e.stale = true;
+        e.at = hit.at;
+      }
+      throw e;
+    }
+  }
+  var peek = (key2) => read(key2)?.data ?? null;
+  async function load(key2, fn, maxAge = 10 * 60 * 1e3) {
+    const hit = read(key2);
+    if (hit && Date.now() - hit.at < maxAge) return hit.data;
+    try {
+      const data = await fn();
+      write(key2, data);
+      return data;
+    } catch (e) {
+      if (hit) return hit.data;
+      throw e;
+    }
+  }
   var DEFAULTS = { target: 75, theme: "system", amoled: false };
   var listeners = /* @__PURE__ */ new Set();
   var prefs = {
@@ -193,6 +454,15 @@
       return () => listeners.delete(f);
     }
   };
+  function ago(at2) {
+    if (!at2) return "";
+    const s = Math.max(0, (Date.now() - at2) / 1e3);
+    if (s < 60) return "Updated just now";
+    if (s < 3600) return `Updated ${Math.floor(s / 60)}m ago`;
+    if (s < 86400) return `Updated ${Math.floor(s / 3600)}h ago`;
+    return `Updated ${Math.floor(s / 86400)}d ago`;
+  }
+  var now = () => globalThis.__JP_PREVIEW__?.now ?? Date.now();
 
   // src/ui/components.js
   function icon(name, size = 24, extra = {}) {
@@ -204,35 +474,4764 @@
       ic.d.map((d) => h("path", { d }))
     );
   }
+  var rings = /* @__PURE__ */ new Set();
+  var raf = 0;
+  var WAVE_MS = 4200;
+  function tick(t) {
+    raf = 0;
+    for (const r of rings) {
+      if (!r.svg.isConnected) {
+        if (r.mounted) rings.delete(r);
+        continue;
+      }
+      r.mounted = true;
+      r.draw(t);
+    }
+    if (rings.size) raf = requestAnimationFrame(tick);
+  }
+  function ring({ percent, target = 75, size = 56, stroke = 6, shortfall = false, animate = true, fill = true }, ...center) {
+    const pct = Math.max(0, Math.min(100, Number(percent) || 0));
+    const safe = pct >= target;
+    const color = safe ? "var(--primary)" : pct >= target - 10 ? "var(--warn)" : "var(--error)";
+    const amp0 = safe ? stroke * 0.24 : 0;
+    const r = size / 2 - stroke / 2 - amp0;
+    const c = size / 2;
+    const start2 = -Math.PI / 2;
+    const gap = Math.min(0.5, stroke * 1.6 / r);
+    const track = h("path", { fill: "none", stroke: "var(--on-surface-variant)", "stroke-opacity": "0.25", "stroke-width": stroke, "stroke-linecap": "round" });
+    const arc = h("path", { fill: "none", stroke: color, "stroke-width": stroke, "stroke-linecap": "round", "stroke-linejoin": "round" });
+    const svg = h("svg", { width: size, height: size, viewBox: `0 0 ${size} ${size}`, style: { position: "absolute", inset: "0" } }, track, arc);
+    const arcPath = (a0, a1) => {
+      const x0 = c + r * Math.cos(a0), y0 = c + r * Math.sin(a0);
+      const x1 = c + r * Math.cos(a1), y1 = c + r * Math.sin(a1);
+      return `M${x0} ${y0}A${r} ${r} 0 ${a1 - a0 > Math.PI ? 1 : 0} 1 ${x1} ${y1}`;
+    };
+    let shown = 0;
+    const born = performance.now() - (fill ? 0 : 1e3);
+    const draw = (t) => {
+      const k = Math.min(1, (t - born) / 700);
+      shown = pct / 100 * (1 - Math.pow(1 - k, 3));
+      const sweep = shown * 2 * Math.PI;
+      if (shown < 0.999) {
+        const ts = start2 + sweep + (shown > 1e-3 ? gap : 0);
+        const te = start2 + 2 * Math.PI - (shown > 1e-3 ? gap : 0);
+        const whole = te - ts > 2 * Math.PI - 1e-3;
+        track.setAttribute("d", whole ? arcPath(start2, start2 + Math.PI) + arcPath(start2 + Math.PI, start2 + 2 * Math.PI - 1e-4).replace("M", "L") : te > ts ? arcPath(ts, te) : "");
+      } else track.setAttribute("d", "");
+      if (shown <= 1e-3) {
+        arc.setAttribute("d", "");
+        return;
+      }
+      const waves = Math.max(8, 2 * Math.PI * r / (stroke * 4.6));
+      const phase = animate && safe ? t % WAVE_MS / WAVE_MS * 2 * Math.PI : 0;
+      const steps = Math.max(24, Math.floor(shown * waves * 16));
+      let d = "";
+      for (let i = 0; i <= steps; i++) {
+        const a = start2 + sweep * i / steps;
+        const edge = Math.min(1, Math.min(i, steps - i) / (steps * 0.08 + 1));
+        const rr = r + amp0 * edge * Math.sin(waves * (a - start2) + phase);
+        d += `${i ? "L" : "M"}${(c + rr * Math.cos(a)).toFixed(2)} ${(c + rr * Math.sin(a)).toFixed(2)}`;
+      }
+      arc.setAttribute("d", d);
+      if (k >= 1 && !(animate && safe)) rings.delete(entry2);
+    };
+    if (shortfall && pct > 0 && pct < target) {
+      const ta = start2 + target / 100 * 2 * Math.PI;
+      svg.append(h("circle", { cx: c + r * Math.cos(ta), cy: c + r * Math.sin(ta), r: stroke * 0.3, fill: "var(--error)" }));
+    }
+    const entry2 = { svg, draw, mounted: false };
+    rings.add(entry2);
+    if (!raf) raf = requestAnimationFrame(tick);
+    draw(born);
+    return h(
+      "div",
+      { class: "ring", style: { position: "relative", width: size + "px", height: size + "px", flex: "none", display: "grid", placeItems: "center" } },
+      svg,
+      h("div", { style: { position: "relative", textAlign: "center", lineHeight: "1.05" } }, ...center)
+    );
+  }
+  function header({ title, subtitle, back, right: right2 }) {
+    return h(
+      "div",
+      { class: "head" },
+      h(
+        "div",
+        { class: "topbar" },
+        back ? h("button", { class: "back", onclick: back, "aria-label": "Back" }, icon("arrow_back")) : h("span"),
+        right2 || h("span")
+      ),
+      h("h1", { class: "headline page-title" }, title),
+      subtitle ? h("div", { class: "label muted page-sub" }, subtitle) : null
+    );
+  }
+  function updated(at2) {
+    const el = h("span", { class: "label muted" }, ago(at2));
+    const id = setInterval(() => {
+      if (!el.isConnected) clearInterval(id);
+      else el.textContent = ago(at2);
+    }, 3e4);
+    return el;
+  }
+  var section = (text) => h("div", { class: "section" }, text);
+  var note = (text) => h("div", { class: "note" }, text);
+  function semChip({ sems, value, onChange, filled = false, label = semLabel }) {
+    const sel = h(
+      "select",
+      { "aria-label": "Semester", onchange: (e) => onChange(sems.find((s) => s.registrationcode === e.target.value)) },
+      sems.map((s) => h("option", { value: s.registrationcode, selected: s.registrationcode === value }, label(s.registrationcode)))
+    );
+    return h("label", { class: ["chip", filled && "filled"] }, label(value), icon("expand_more", 20), sel);
+  }
+  function segmented({ options, value, onChange }) {
+    return h(
+      "div",
+      { class: "seg", role: "tablist" },
+      options.map(([k, text]) => h("button", { role: "tab", "aria-selected": String(k === value), onclick: () => onChange(k) }, text))
+    );
+  }
+  var spinner = () => h("div", { class: "center" }, h("div", { class: "spinner" }));
+  var skeletons = (n = 4, height = 100) => h("div", { class: "stack" }, Array.from({ length: n }, () => h("div", { class: "skeleton", style: { height: height + "px" } })));
+  function emptyState(title, body, action) {
+    return h(
+      "div",
+      { class: "center" },
+      h("div", { class: "title-lg" }, title),
+      body ? h("div", { class: "body-md muted", style: { maxWidth: "280px" } }, body) : null,
+      action || null
+    );
+  }
+  function signInAgain() {
+    try {
+      localStorage.setItem("Token", "");
+      const cap = JSON.parse(localStorage.getItem("jp:login") || "{}");
+      delete cap.token;
+      localStorage.setItem("jp:login", JSON.stringify(cap));
+    } catch {
+    }
+    location.href = "/studentportal/";
+  }
+  function errorState(err, retry) {
+    const expired = err?.kind === "expired";
+    return emptyState(
+      expired ? "Signed out" : "Couldn't load this",
+      expired ? "Your portal session ran out. Sign in again on the portal." : err?.message || String(err),
+      expired ? h("button", { class: "btn", onclick: signInAgain }, "Sign in") : retry ? h("button", { class: "btn tonal", onclick: retry }, icon("refresh", 18), "Retry") : null
+    );
+  }
+  function staleBanner(err) {
+    return h("div", { class: "banner" }, icon("wifi_off", 18), h("span", null, `Showing saved data. ${err?.message || ""}`));
+  }
+  function sheet(...content) {
+    const host = document.querySelector("#jportal-root")?.shadowRoot?.querySelector(".app") || globalThis.__jpApp;
+    const close = () => {
+      scrim.remove();
+      panel.remove();
+    };
+    const scrim = h("div", { class: "scrim", onclick: close });
+    const panel = h("div", { class: "sheet" }, h("div", { class: "grip" }), ...content);
+    host.append(scrim, panel);
+    return close;
+  }
+
+  // src/core/crypto.js
+  var IV = new TextEncoder().encode("dcek9wb8frty1pnm");
+  var IST_MS = 330 * 60 * 1e3;
+  function dateSeq(ms) {
+    const d = new Date(ms + IST_MS);
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const yy = String(d.getUTCFullYear() % 100).padStart(2, "0");
+    return `${dd[0]}${mm[0]}${yy[0]}${d.getUTCDay()}${dd[1]}${mm[1]}${yy[1]}`;
+  }
+  var keys = /* @__PURE__ */ new Map();
+  function key(ms) {
+    const seq = dateSeq(ms);
+    if (!keys.has(seq)) {
+      const raw = new TextEncoder().encode(`qa8y${seq}ty1pn`);
+      keys.set(seq, crypto.subtle.importKey("raw", raw, { name: "AES-CBC" }, false, ["encrypt", "decrypt"]));
+    }
+    return keys.get(seq);
+  }
+  var b64 = (bytes2) => {
+    let s = "";
+    for (const b of new Uint8Array(bytes2)) s += String.fromCharCode(b);
+    return btoa(s);
+  };
+  async function encrypt(plain, ms) {
+    const out = await crypto.subtle.encrypt({ name: "AES-CBC", iv: IV }, await key(ms), new TextEncoder().encode(plain));
+    return b64(out);
+  }
+  var ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  var noise = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => ALNUM[b % ALNUM.length]).join("");
+  var localName = (ms) => encrypt(noise(4) + dateSeq(ms) + noise(5), ms);
+
+  // src/core/api.js
+  var BASE = "https://webportal.jiit.ac.in:6011/StudentPortalAPI";
+  var PortalError = class extends Error {
+    /** kind: expired | forbidden | unavailable | empty | portal | malformed | network */
+    constructor(kind, message, errors = []) {
+      super(message || kind);
+      this.kind = kind;
+      this.errors = errors;
+    }
+    /** the portal's "NO ... FOUND" answers, an empty list rather than a failure */
+    get isNoData() {
+      return this.kind === "portal" && this.errors.some((e) => /\bno\b.*\bfound\b|not found|no record/i.test(e));
+    }
+  };
+  var skew = Number(localStorage.getItem("jp:skew") || 0);
+  var now2 = () => Date.now() + skew;
+  function observe(res) {
+    const d = Date.parse(res.headers.get("Date") || "");
+    if (!Number.isNaN(d)) {
+      skew = d - Date.now();
+      try {
+        localStorage.setItem("jp:skew", String(skew));
+      } catch {
+      }
+    }
+  }
+  async function exchange(path, method, body) {
+    const url = path.startsWith("https://") ? path : BASE + path;
+    const s = session();
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/plain, */*",
+          Authorization: `Bearer ${s?.token || ""}`,
+          LocalName: await localName(now2())
+        },
+        body
+      });
+    } catch (e) {
+      throw new PortalError("network", "Can't reach the portal");
+    }
+    observe(res);
+    return res;
+  }
+  async function unwrap(res) {
+    if (res.status === 401) throw new PortalError("expired", "Session expired, sign in again");
+    if (res.status === 403) throw new PortalError("forbidden", "The portal refused that");
+    const text = await res.text();
+    if (!text.trim()) {
+      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
+      if (res.status >= 400) throw new PortalError("portal", `Portal error ${res.status}`);
+      throw new PortalError("empty", "The portal sent nothing back");
+    }
+    let root;
+    try {
+      root = JSON.parse(text);
+    } catch {
+    }
+    if (!root || typeof root !== "object") {
+      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
+      throw new PortalError("malformed", "Unexpected answer from the portal");
+    }
+    const st = root.status;
+    if (st?.responseStatus === "Success" && res.status < 400) return root.response ?? null;
+    if (res.status >= 500 && !st) throw new PortalError("unavailable", "The portal is down right now");
+    const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === "string") : [];
+    throw new PortalError("portal", errors[0] || "The portal returned an error", errors);
+  }
+  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  var transient = (e) => ["unavailable", "empty", "network"].includes(e.kind);
+  var refreshing = null;
+  async function refreshSession() {
+    if (globalThis.__JP_PREVIEW__) return false;
+    refreshing ??= (async () => {
+      try {
+        const tokendate = tokenDate();
+        const res = await unwrap(await exchange(
+          "/token/refreshTokenRequest",
+          "POST",
+          JSON.stringify({ username: session()?.username || "", tokendate })
+        ));
+        return res?.msg === "Success";
+      } catch {
+        return false;
+      } finally {
+        setTimeout(() => {
+          refreshing = null;
+        }, 0);
+      }
+    })();
+    return refreshing;
+  }
+  async function post(path, payload, opts = {}) {
+    try {
+      return await postOnce(path, payload, opts);
+    } catch (e) {
+      if (e instanceof PortalError && e.kind === "expired" && await refreshSession()) return postOnce(path, payload, opts);
+      throw e;
+    }
+  }
+  async function postOnce(path, payload, { encrypted = false, retry = true } = {}) {
+    const delays = retry ? [500, 1500] : [];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const before = dateSeq(now2());
+        const send = async () => {
+          const json = payload == null ? void 0 : JSON.stringify(payload);
+          const body = json && encrypted ? await encrypt(json, now2()) : json;
+          return unwrap(await exchange(path, "POST", body));
+        };
+        try {
+          return await send();
+        } catch (e) {
+          if (e.kind === "empty" && dateSeq(now2()) !== before) return await send();
+          throw e;
+        }
+      } catch (e) {
+        if (!(e instanceof PortalError) || !transient(e) || attempt >= delays.length) throw e;
+        await sleep(delays[attempt]);
+      }
+    }
+  }
+  async function bytes(path) {
+    const res = await exchange(path, "GET");
+    const type = res.headers.get("Content-Type") || "";
+    if (type.includes("json") || res.status >= 400) {
+      await unwrap(res);
+      throw new PortalError("malformed", "Expected a file, got json");
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (!buf.length) throw new PortalError("empty", "The portal sent nothing back");
+    return buf;
+  }
+  async function orEmpty(empty, p) {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof PortalError && e.isNoData) return empty;
+      throw e;
+    }
+  }
+  var iid = () => session().instituteId;
+  var enc = { encrypted: true };
+  var api = {
+    // attendance                                               fixture
+    attendanceMeta: () => (
+      // att_meta.json
+      post("/StudentClassAttendance/getstudentInforegistrationforattendence", { instituteid: iid() })
+    ),
+    attendance: (sem, stynumber) => orEmpty(
+      { studentattendancelist: [] },
+      // att_detail_2026ODDSEM.json
+      post("/StudentClassAttendance/getstudentattendancedetail", {
+        instituteid: iid(),
+        registrationcode: sem.registrationcode,
+        registrationid: sem.registrationid,
+        stynumber
+      }, enc)
+    ),
+    /** subject = a studentattendancelist row; components = its subjectcomponentid(s) to include */
+    dailyAttendance: (sem, subject2, components) => orEmpty(
+      { studentAttdsummarylist: [] },
+      // daily_*.json
+      post("/StudentClassAttendance/getstudentsubjectpersentage", {
+        instituteid: iid(),
+        subjectid: subject2.subjectid,
+        registrationid: sem.registrationid,
+        cmpidkey: components.map((c) => ({ subjectcomponentid: c })),
+        // a raw attendance row's subjectcode is "NAME(CODE)", the portal wants the bare code
+        subjectcode: subject2.individualsubjectcode || subject2.subjectcode,
+        registrationcode: sem.registrationcode
+      }, enc)
+    ),
+    // subjects
+    subjectSemesters: () => post("/reqsubfaculty/getregistrationList", { instituteid: iid() }, enc),
+    // gc_regs.json shape
+    registeredSubjects: (sem) => orEmpty(
+      { registrations: [] },
+      // faculties.json
+      post("/reqsubfaculty/getfaculties", { studentid: session().memberId, instituteid: iid(), registrationid: sem.registrationid }, enc)
+    ),
+    credits: () => post("/feedbackformcontroller/getCreadits", { enrollmentNo: session().enrollmentNo }),
+    // credits.json
+    // exams
+    examSemesters: () => orEmpty(
+      { semesterCodeinfo: { semestercode: [] } },
+      // exam_sems.json
+      post("/studentcommonsontroller/getsemestercode-withstudentexamevents", { clientid: session().clientId, instituteid: iid() }, enc)
+    ),
+    examEvents: (sem) => orEmpty(
+      { eventcode: { examevent: [] } },
+      // exam_events.json
+      post("/studentcommonsontroller/getstudentexamevents", { instituteid: iid(), registationid: sem.registrationid }, enc)
+    ),
+    /** event = an exam event row (exameventid, registrationid) */
+    examSchedule: (event2) => orEmpty(
+      { subjectinfo: [] },
+      // exam_schedule.json
+      post("/studentsttattview/getstudent-examschedule", { instituteid: iid(), exameventid: event2.exameventid, registrationid: event2.registrationid }, enc)
+    ),
+    // marks
+    marksSemesters: () => orEmpty(
+      { semestercode: [] },
+      // marks_sems.json
+      post("/studentcommonsontroller/getsemestercode-exammarks", { instituteid: iid() }, enc)
+    ),
+    marksPdf: (sem) => bytes(`/studentsexamview/printstudent-exammarks/${iid()}/${sem.registrationid}/${sem.registrationcode}`),
+    // marks/*.pdf
+    // grades
+    gradeCardSemesters: () => orEmpty(
+      { registrations: [] },
+      // gc_regs.json
+      post("/studentgradecard/getregistrationList", { instituteid: iid() }, enc)
+    ),
+    program: () => post("/studentgradecard/getstudentinfo", { instituteid: iid() }, enc),
+    // gc_info.json
+    /** program = program().studentinfo */
+    gradeCard: (sem, program) => orEmpty(
+      { gradecard: [] },
+      // gradecard_2026EVESEM.json
+      post("/studentgradecard/showstudentgradecard", {
+        instituteid: iid(),
+        registrationid: sem.registrationid,
+        branchid: program.branchid,
+        programid: program.programid
+      }, enc)
+    ),
+    /** sgpa/cgpa for every finished semester; stynumber = current semester number */
+    semesterResults: (stynumber) => orEmpty(
+      { semesterList: [] },
+      // sgpa_all.json
+      post("/studentsgpacgpa/getallsemesterdata", { instituteid: iid(), studentid: session().memberId, stynumber }, enc)
+    ),
+    // me
+    personalInfo: () => post("/studentpersinfo/getstudent-personalinformation", { instituteid: iid() }),
+    // personal.json
+    bankInfo: () => post("/studentbankdetails/getstudentbankinfo", { instituteid: iid() }, enc),
+    // bank.json
+    hostel: () => orEmpty(null, post("/myhostelallocationdetail/gethostelallocationdetail", { instituteid: iid() })),
+    // hostel.json
+    fees: () => orEmpty(null, post("/studentfeeledger/loadfeesummary", { instituteid: iid() })),
+    // fees.json
+    // registration, read only
+    choiceSemesters: () => orEmpty({ registrationcodelist: [] }, post("/studentchoiceprint/getsemestercodelist", {}, enc)),
+    // choice_sems.json
+    subjectChoices: (sem) => orEmpty(
+      { subjectpreferencegrid: [] },
+      // choices.json
+      post("/studentchoiceprint/getsubjectpreference", { instituteid: iid(), clientid: session().clientId, registrationid: sem.registrationid }, enc)
+    ),
+    moocSemesters: () => orEmpty([], post("/moocsubjectstatus/getsemestercodelist", { instituteid: iid() })),
+    // mooc_sems.json
+    moocStatus: (sem) => orEmpty(null, post("/moocsubjectstatus/getsubjectstatus", { instituteid: iid(), registrationid: sem.registrationid }))
+    // mooc_status.json
+  };
+
+  // src/screens/attendance/common.js
+  var META_KEY = "att:meta";
+  var detailKey = (semCode) => `att:${semCode}`;
+  var dailyKey = (semCode, row) => `att:daily:${semCode}:${subjectCode(row)}`;
+  var semNumber = (meta) => String(meta?.headerlist?.[0]?.stynumber ?? "");
+  var semesters = (meta) => (meta?.semlist || []).filter((s) => s?.registrationcode);
+  var stillRing = (opts, ...center) => ring({ ...opts, fill: false }, ...center);
+  var placeholder = (w, hgt = 12) => h("span", { class: "att-ph", style: { width: w + "px", height: hgt + "px" } });
+  function scheduler(fn) {
+    let queued = false;
+    return () => {
+      if (queued) return;
+      queued = true;
+      queueMicrotask(() => {
+        queued = false;
+        fn();
+      });
+    };
+  }
+  var SHARED_CSS = `
+.att-ph { display: inline-block; border-radius: 6px; background: var(--on-surface-variant); opacity: .18; animation: att-pulse 1.7s ease-in-out infinite; vertical-align: middle; }
+@keyframes att-pulse { 50% { opacity: .08; } }
+.att-num { font-weight: 700; font-variation-settings: 'ROND' 100; font-variant-numeric: tabular-nums; }
+`;
+  var dailySubject = (row) => ({ subjectid: row.subjectid, subjectcode: row.individualsubjectcode });
+
+  // src/screens/attendance/target.js
+  var TARGET_CSS = `
+.att-sheet { display: flex; flex-direction: column; align-items: center; gap: 16px; padding: 0 4px 8px; }
+.att-sheet .headline-sm { text-align: center; }
+.att-sheet .ringbox { width: 120px; height: 120px; }
+.att-sheet .val { font-size: 33px; line-height: 36px; letter-spacing: -1.1px; }
+.att-slider { -webkit-appearance: none; appearance: none; width: 100%; height: 44px; background: transparent; margin: 0; touch-action: pan-x; }
+.att-slider:focus { outline: none; }
+.att-slider::-webkit-slider-runnable-track { height: 16px; border-radius: 8px; background: linear-gradient(to right, var(--primary) 0 var(--fill), var(--secondary-container) var(--fill) 100%); }
+.att-slider::-moz-range-track { height: 16px; border-radius: 8px; background: linear-gradient(to right, var(--primary) 0 var(--fill), var(--secondary-container) var(--fill) 100%); }
+.att-slider::-webkit-slider-thumb { -webkit-appearance: none; width: 4px; height: 44px; margin-top: -14px; border-radius: 2px; background: var(--primary); box-shadow: 0 0 0 6px var(--sc-low); }
+.att-slider::-moz-range-thumb { width: 4px; height: 44px; border: 0; border-radius: 2px; background: var(--primary); }
+.att-sheet .actions { align-self: stretch; display: flex; justify-content: flex-end; }
+`;
+  function openTargetSheet() {
+    let value = Number(prefs.get("target")) || 75;
+    const ringBox = h("div", { class: "ringbox" });
+    const drawRing = () => render(ringBox, stillRing(
+      { percent: value, target: 75, size: 120, stroke: 12 },
+      h("div", { class: "att-num val" }, `${value}%`)
+    ));
+    const fill = () => (value - 50) / 50 * 100 + "%";
+    const slider = h("input", {
+      class: "att-slider",
+      type: "range",
+      min: 50,
+      max: 100,
+      step: 1,
+      value,
+      "aria-label": "Attendance goal",
+      "--fill": fill(),
+      oninput: (e) => {
+        const v = Math.round(Number(e.target.value));
+        if (v === value) return;
+        value = v;
+        slider.style.setProperty("--fill", fill());
+        slider.setAttribute("aria-valuetext", `${value} percent`);
+        drawRing();
+      },
+      onchange: () => prefs.set("target", value)
+    });
+    drawRing();
+    const close = sheet(h(
+      "div",
+      { class: "att-sheet" },
+      h("div", { class: "headline-sm" }, "Attendance goal"),
+      h("div", { class: "body-md muted" }, "Subjects under this get flagged."),
+      ringBox,
+      slider,
+      h(
+        "div",
+        { class: "actions" },
+        h("button", { class: "btn att-done", onclick: () => {
+          if (Number(prefs.get("target")) !== value) prefs.set("target", value);
+          close();
+        } }, "Done")
+      )
+    ));
+    return close;
+  }
 
   // src/screens/attendance.js
-  var attendance = () => h("div", { class: "center" }, "TODO: attendance");
+  var CSS = SHARED_CSS + TARGET_CSS + `
+.att-list { display: flex; flex-direction: column; gap: 10px; }
+.att-hero { display: flex; align-items: center; gap: 20px; padding: 20px; border-radius: var(--r-xl); background: var(--primary-container); color: var(--on-primary-container); margin-bottom: 6px; }
+.att-hero .copy { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.att-hero .big { font-size: 36px; line-height: 38px; letter-spacing: -1.2px; }
+.att-hero .unit { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .3px; }
+.att-hero .two { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.att-target { position: relative; isolation: isolate; border-radius: var(--r-sm); padding: 6px 12px; font-size: 14px; line-height: 20px; font-weight: 600; color: var(--on-surface); }
+.att-target::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: var(--surface); opacity: .55; z-index: -1; }
+.att-target.ok { color: var(--good); }
+.att-target:active::before { opacity: .8; }
+.att-card { display: flex; align-items: center; gap: 16px; padding: 16px; transition: background-color .6s; }
+.att-card .ring .pct { font-size: 16px; line-height: 20px; font-weight: 700; padding: 0 8px; }
+.att-card .ring .pct.none { color: var(--on-surface-variant); }
+.att-card .name { font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: .1px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.att-card .meta { display: flex; align-items: center; gap: 6px; margin-top: 4px; min-height: 18px; }
+.att-tag { display: inline-grid; place-items: center; min-width: 18px; height: 18px; padding: 0 6px; border-radius: var(--r-xs); background: var(--secondary-container); color: var(--on-secondary-container); font-size: 11px; line-height: 16px; font-weight: 600; }
+.att-card .count { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); font-variant-numeric: tabular-nums; }
+.att-card .dots { margin-left: 4px; flex: none; }
+.att-card .verdict { margin-top: 4px; font-size: 14px; line-height: 20px; font-weight: 600; min-height: 20px; display: flex; align-items: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.att-card .verdict.good { color: var(--good); }
+.att-card .verdict.bad { color: var(--error); }
+.att-card .verdict.warn { color: var(--warn); }
+.att-card .verdict.muted { color: var(--on-surface-variant); }
+.att-card .ring.pulse { animation: att-pulse-ring 1.7s ease-in-out infinite; }
+@keyframes att-pulse-ring { 50% { opacity: .45; } }
+.att-hero .spin { width: 40px; height: 40px; border-width: 4px; }
+`;
+  function line(row, daily) {
+    const classes = daily?.data ? classesOf(daily.data) : null;
+    const t = classes ? tally(classes) : null;
+    const counted = t && t.total > 0 ? t : null;
+    const portal = portalPercent(row) ?? 0;
+    return {
+      row,
+      code: subjectCode(row),
+      classes,
+      tally: counted,
+      counting: !daily?.data && !daily?.err,
+      started: counted != null || portal > 0,
+      percent: portal,
+      // the last few classes, oldest first, true for present
+      recent: classes ? chronological(classes).slice(-7).map((c) => c.present) : []
+    };
+  }
+  function recentDots(recent) {
+    if (!recent.length) return null;
+    const hgt = 8, step = 11, w = 1.8, m = w / 2;
+    const present = recent.filter(Boolean).length;
+    return h("svg", {
+      class: "dots",
+      width: recent.length * step - 3,
+      height: hgt,
+      viewBox: `0 0 ${recent.length * step - 3} ${hgt}`,
+      role: "img",
+      "aria-label": `last ${recent.length} classes: ${present} present, ${recent.length - present} absent`
+    }, recent.map((p, i) => {
+      const x = i * step;
+      return p ? h("circle", { cx: x + hgt / 2, cy: hgt / 2, r: hgt / 2 * 0.85, fill: "var(--good)" }) : h("path", { d: `M${x + m} ${m}L${x + hgt - m} ${hgt - m}M${x + hgt - m} ${m}L${x + m} ${hgt - m}`, stroke: "var(--error)", "stroke-width": w, "stroke-linecap": "round", fill: "none" });
+    }));
+  }
+  function verdict(l, target) {
+    if (l.counting) return h("div", { class: "verdict" }, placeholder(84));
+    const t = l.tally;
+    if (t) {
+      const miss = canMiss(t, target);
+      const need = mustAttend(t, target);
+      if (need === Infinity) return h("div", { class: "verdict bad" }, `Can't reach ${target}%`);
+      if (need > 0) return h("div", { class: "verdict bad" }, `Attend the next ${need}`);
+      if (miss > 0) return h("div", { class: "verdict good" }, `Can miss ${miss}`);
+      return h("div", { class: "verdict warn" }, "Right on the edge, don't miss");
+    }
+    if (l.started) return h("div", { class: "verdict muted" }, "Portal's %, class list didn't load");
+    return h("div", { class: "verdict muted" }, "No classes marked yet");
+  }
+  function subjectCard(l, target, onClick, still) {
+    const below = l.started && l.percent < target;
+    const pct = Math.round(l.percent);
+    const mk = still ? stillRing : ring;
+    const r = mk(
+      { percent: l.started ? l.percent : 0, target, size: 60, stroke: 6, shortfall: true },
+      l.started || !l.counting ? h("div", { class: ["pct", !l.started && "none"], "aria-label": l.started ? `${pct} percent` : "not started" }, l.started ? String(pct) : "\u2013") : null
+    );
+    if (l.counting && !l.started) r.classList.add("pulse");
+    return h(
+      "div",
+      { class: ["card", "tap", "att-card", below && "bad"], role: "button", tabindex: "0", onclick: onClick },
+      r,
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "name" }, titleCase(subjectName(l.row))),
+        h(
+          "div",
+          { class: "meta" },
+          componentTags(l.row).map(([k]) => h("span", { class: "att-tag", title: { L: "Lecture", T: "Tutorial", P: "Practical" }[k] }, k)),
+          l.counting ? placeholder(34) : l.tally ? [
+            h("span", { class: "count", "aria-label": `${l.tally.attended} of ${l.tally.total} classes` }, `${l.tally.attended}/${l.tally.total}`),
+            recentDots(l.recent)
+          ] : null
+        ),
+        verdict(l, target)
+      )
+    );
+  }
+  function overview(lines, target, still) {
+    const counted = lines.map((l) => l.tally).filter(Boolean);
+    const total = tallyOf(counted.reduce((a, t) => a + t.attended, 0), counted.reduce((a, t) => a + t.total, 0));
+    const waiting = lines.filter((l) => l.counting).length;
+    const uncounted = lines.filter((l) => l.started && !l.tally).length;
+    const startedLines = lines.filter((l) => l.started);
+    const percent = waiting > 0 ? 0 : total.total > 0 ? percentOf(total) : startedLines.length ? startedLines.reduce((a, l) => a + l.percent, 0) / startedLines.length : 0;
+    const low = lines.filter((l) => l.started && l.percent < target).length;
+    const title = waiting > 0 ? "Counting classes" : !startedLines.length ? "No classes yet" : low === 0 ? "All clear" : low === 1 ? "1 subject below target" : `${low} subjects below target`;
+    const sub = waiting > 0 ? `${lines.length - waiting} of ${lines.length} subjects in` : total.total === 0 ? "Nothing marked this semester" : uncounted > 0 ? `${total.attended} of ${total.total} classes, ${uncounted} not counted` : `${total.attended} of ${total.total} classes attended`;
+    const mk = still ? stillRing : ring;
+    return h(
+      "div",
+      { class: "att-hero" },
+      mk(
+        { percent, target, size: 116, stroke: 12 },
+        waiting > 0 ? h("div", { class: "spinner spin" }) : h(
+          "div",
+          { style: { padding: "0 18px" } },
+          h("div", { class: "att-num big" }, String(Math.round(percent))),
+          h("div", { class: "unit" }, "percent")
+        )
+      ),
+      h(
+        "div",
+        { class: "copy" },
+        h("div", { class: "title-lg two" }, title),
+        h("div", { class: "body-md two" }, sub),
+        h("button", { class: ["att-target", low === 0 && "ok"], onclick: () => openTargetSheet() }, `Target ${target}%`)
+      )
+    );
+  }
+  function attendance(ctx) {
+    const root = h("div", { class: "att" });
+    const body = h("div");
+    root.append(h("style", null, CSS), body);
+    const st = {
+      meta: null,
+      metaAt: 0,
+      metaErr: null,
+      sem: null,
+      detail: null,
+      detailAt: 0,
+      detailErr: null,
+      daily: /* @__PURE__ */ new Map(),
+      // code -> { data, err }
+      gen: 0
+    };
+    const keep = /* @__PURE__ */ new Map();
+    const draw = scheduler(paint);
+    function loadMeta() {
+      st.metaErr = null;
+      cached(META_KEY, api.attendanceMeta, (d, { at: at2 }) => {
+        st.meta = d;
+        st.metaAt = at2;
+        pickSemester();
+        draw();
+      }).catch((e) => {
+        st.metaErr = e;
+        draw();
+      });
+    }
+    function pickSemester(force = false) {
+      const all = semesters(st.meta);
+      const pinned = prefs.get("semester");
+      const sem = all.find((s) => s.registrationcode === pinned) || all[0] || null;
+      if (!sem) {
+        st.sem = null;
+        return;
+      }
+      if (!force && st.sem?.registrationcode === sem.registrationcode) return;
+      st.sem = sem;
+      loadDetail(sem);
+    }
+    function loadDetail(sem) {
+      const gen = ++st.gen;
+      const asked = /* @__PURE__ */ new Set();
+      st.detail = null;
+      st.detailErr = null;
+      st.detailAt = 0;
+      st.daily = /* @__PURE__ */ new Map();
+      cached(detailKey(sem.registrationcode), () => api.attendance(sem, semNumber(st.meta)), (d, { at: at2 }) => {
+        if (gen !== st.gen) return;
+        st.detail = d;
+        st.detailAt = at2;
+        for (const row of d?.studentattendancelist || []) {
+          const code = subjectCode(row);
+          if (asked.has(code)) continue;
+          asked.add(code);
+          cached(dailyKey(sem.registrationcode, row), () => api.dailyAttendance(sem, dailySubject(row), componentIds(row)), (dd) => {
+            if (gen !== st.gen) return;
+            st.daily.set(code, { data: dd, err: null });
+            const gap = drift(portalPercent(row), classesOf(dd));
+            if (gap != null) console.debug("[jportal] attendance drift", code, gap.toFixed(1));
+            draw();
+          }).catch((e) => {
+            if (gen !== st.gen) return;
+            const cur = st.daily.get(code);
+            st.daily.set(code, { data: cur?.data ?? null, err: e });
+            draw();
+          });
+        }
+        draw();
+      }).catch((e) => {
+        if (gen === st.gen) {
+          st.detailErr = e;
+          draw();
+        }
+      });
+    }
+    const retry = () => {
+      st.sem = null;
+      if (st.meta) pickSemester(true);
+      loadMeta();
+      draw();
+    };
+    function paint() {
+      const target = Number(prefs.get("target")) || 75;
+      if (!st.meta) {
+        render(body, st.metaErr ? errorState(st.metaErr, retry) : loading());
+        return;
+      }
+      const all = semesters(st.meta);
+      const current = all[0];
+      const head = header({
+        title: "Attendance",
+        subtitle: st.detailAt ? updated(st.detailAt) : null,
+        right: st.sem ? semChip({
+          sems: all,
+          value: st.sem.registrationcode,
+          filled: st.sem !== current,
+          onChange: (s) => {
+            prefs.set("semester", s === current ? null : s.registrationcode);
+            pickSemester();
+            draw();
+          }
+        }) : null
+      });
+      const stale = st.metaErr?.stale ? st.metaErr : st.detailErr?.stale ? st.detailErr : null;
+      if (!st.sem) {
+        render(body, head, emptyState("No attendance for this semester yet"));
+        return;
+      }
+      if (!st.detail) {
+        render(body, head, st.detailErr ? errorState(st.detailErr, retry) : loading(true));
+        return;
+      }
+      const rows2 = st.detail.studentattendancelist || [];
+      if (!rows2.length) {
+        render(body, head, stale && staleBanner(stale), emptyState("No attendance for this semester yet"));
+        return;
+      }
+      const lines = rows2.map((r) => line(r, st.daily.get(subjectCode(r))));
+      const semCode = st.sem.registrationcode;
+      const reuse = (key2, sig, make) => {
+        const hit = keep.get(key2);
+        if (hit && hit.sig === sig) return hit.el;
+        const el = make(!!hit);
+        keep.set(key2, { sig, el });
+        return el;
+      };
+      const heroSig = JSON.stringify([target, lines.map((l) => [l.tally, l.counting, l.started, l.percent])]);
+      render(
+        body,
+        head,
+        stale ? staleBanner(stale) : null,
+        h(
+          "div",
+          { class: "att-list" },
+          reuse(`hero:${semCode}`, heroSig, (seen) => overview(lines, target, seen)),
+          lines.map((l) => reuse(
+            `card:${semCode}:${l.code}`,
+            JSON.stringify([target, l.tally, l.counting, l.started, l.percent, l.recent, l.row.subjectcode, componentTags(l.row)]),
+            (seen) => subjectCard(l, target, () => ctx.nav.push("subject", { semCode, subjectCode: l.code }), seen)
+          ))
+        )
+      );
+    }
+    function loading(withHead) {
+      return h(
+        "div",
+        null,
+        withHead ? null : header({ title: "Attendance" }),
+        h("div", { class: "skeleton", style: { height: "156px", borderRadius: "var(--r-xl)", marginBottom: "16px" } }),
+        skeletons(5, 92)
+      );
+    }
+    prefs.onChange((k) => {
+      if (k === "target") draw();
+    });
+    paint();
+    loadMeta();
+    return root;
+  }
+
+  // src/screens/attendance/calendar.js
+  var CALENDAR_CSS = `
+.att-cal .mhead { display: flex; align-items: center; padding: 0 0 0 8px; }
+.att-cal .mhead .title { flex: 1; }
+.att-cal .mhead .iconbtn { width: 48px; height: 48px; color: var(--on-surface); }
+.att-cal .mhead .iconbtn[disabled] { color: var(--on-surface-variant); opacity: .45; cursor: default; }
+.att-cal .mhead .iconbtn[disabled]:active { background: none; }
+.att-cal .prev svg { transform: rotate(180deg); }
+.att-cal .wk, .att-cal .grid { display: grid; grid-template-columns: repeat(7, 1fr); }
+.att-cal .wk div { text-align: center; font-size: 11px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); padding: 6px 0 4px; }
+.att-cal .cell { aspect-ratio: 1 / 1; padding: 3px; display: block; width: 100%; }
+.att-cal .cell .disc { width: 100%; height: 100%; border-radius: 50%; display: grid; place-items: center; transform: scale(.86); transition: transform .2s cubic-bezier(.2,.8,.2,1); font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; color: var(--on-surface-variant); position: relative; }
+.att-cal .cell .disc span { opacity: .6; }
+.att-cal .cell.p .disc { background: var(--good-container); color: var(--on-tertiary-container); }
+.att-cal .cell.a .disc { background: var(--error-container); color: var(--on-error-container); }
+.att-cal .cell.m .disc { background: linear-gradient(to right, var(--good-container) 50%, var(--error-container) 50%); color: var(--on-surface); }
+.att-cal .cell.p .disc span, .att-cal .cell.a .disc span, .att-cal .cell.m .disc span { opacity: 1; }
+.att-cal .cell.a .disc span { text-decoration: line-through; }
+.att-cal .cell.today .disc { box-shadow: inset 0 0 0 1.5px var(--outline-variant); }
+.att-cal .cell.sel .disc { transform: scale(1); box-shadow: inset 0 0 0 2.5px var(--primary); }
+`;
+  var pad = (n) => String(n).padStart(2, "0");
+  function monthCalendar(marks2, today, onSelect) {
+    const keys2 = [...marks2.keys()].sort();
+    if (!keys2.length) return null;
+    const ym = (iso) => {
+      const [y, m] = iso.split("-").map(Number);
+      return y * 12 + (m - 1);
+    };
+    const first = ym(keys2[0]), last = ym(keys2.at(-1));
+    let page = last;
+    let selected = null;
+    const el = h("div", { class: "att-cal" });
+    function draw() {
+      const y = Math.floor(page / 12), m = page % 12;
+      const days = new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+      const lead = (new Date(Date.UTC(y, m, 1)).getUTCDay() + 6) % 7;
+      const cells2 = [];
+      for (let i = 0; i < lead; i++) cells2.push(h("div", { class: "cell" }));
+      for (let d = 1; d <= days; d++) {
+        const iso = `${y}-${pad(m + 1)}-${pad(d)}`;
+        const mark = marks2.get(iso);
+        const cls = mark === "present" ? "p" : mark === "absent" ? "a" : mark === "mixed" ? "m" : "";
+        const spoken = mark === "present" ? "present" : mark === "absent" ? "absent" : mark === "mixed" ? "partly present" : "no class";
+        cells2.push(h("button", {
+          class: ["cell", cls, iso === today && !mark && "today", iso === selected && "sel"],
+          "aria-label": `${d} ${MONTHS[m]}, ${spoken}`,
+          "aria-pressed": String(iso === selected),
+          onclick: () => {
+            selected = selected === iso ? null : iso;
+            draw();
+            onSelect(selected);
+          }
+        }, h("div", { class: "disc" }, h("span", null, String(d)))));
+      }
+      render(
+        el,
+        h(
+          "div",
+          { class: "mhead" },
+          h("div", { class: "title" }, `${MONTHS[m]} ${y}`),
+          h("button", { class: "iconbtn prev", "aria-label": "Previous month", disabled: page <= first, onclick: () => {
+            if (page > first) {
+              page--;
+              draw();
+            }
+          } }, icon("chevron_right")),
+          h("button", { class: "iconbtn next", "aria-label": "Next month", disabled: page >= last, onclick: () => {
+            if (page < last) {
+              page++;
+              draw();
+            }
+          } }, icon("chevron_right"))
+        ),
+        h("div", { class: "wk" }, ["M", "T", "W", "T", "F", "S", "S"].map((d) => h("div", null, d))),
+        h("div", { class: "grid" }, cells2)
+      );
+    }
+    draw();
+    return el;
+  }
+
+  // src/screens/attendance/trend.js
+  var gid = 0;
+  function smooth(pts) {
+    if (!pts.length) return "";
+    let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 1; i < pts.length; i++) {
+      const [px, py] = pts[i - 1], [cx, cy] = pts[i];
+      d += `Q${px.toFixed(1)} ${py.toFixed(1)} ${((px + cx) / 2).toFixed(1)} ${((py + cy) / 2).toFixed(1)}`;
+      if (i === pts.length - 1) d += `L${cx.toFixed(1)} ${cy.toFixed(1)}`;
+    }
+    if (pts.length === 1) d += `L${pts[0][0]} ${pts[0][1]}`;
+    return d;
+  }
+  function trendChart(values, target) {
+    if (values.length < 2) return null;
+    const H2 = 120;
+    const last = Math.round(values.at(-1));
+    const el = h("div", { class: "att-trend", role: "img", "aria-label": `Attendance trend, now ${last} percent, goal ${target} percent`, style: { height: H2 + "px", position: "relative" } });
+    const id = `att-tg${++gid}`;
+    let drawnW = 0;
+    const draw = () => {
+      const W = Math.round(el.clientWidth);
+      if (!W || W === drawnW) return;
+      drawnW = W;
+      const pad3 = 6;
+      const lo = Math.min(Math.min(...values), target) - 5;
+      const hi = 100;
+      const y = (v) => pad3 + (H2 - 2 * pad3) - (v - lo) / (hi - lo) * (H2 - 2 * pad3);
+      const step = (W - 2 * pad3) / (values.length - 1);
+      const pts = values.map((v, i) => [pad3 + i * step, y(v)]);
+      const line2 = smooth(pts);
+      const end = pts.at(-1);
+      const gy = y(target);
+      render(el, h(
+        "svg",
+        { width: W, height: H2, viewBox: `0 0 ${W} ${H2}`, style: { display: "block", overflow: "visible" } },
+        h("defs", null, h(
+          "linearGradient",
+          { id, x1: 0, y1: 0, x2: 0, y2: 1 },
+          h("stop", { offset: "0", "stop-color": "var(--primary)", "stop-opacity": "0.28" }),
+          h("stop", { offset: "1", "stop-color": "var(--primary)", "stop-opacity": "0" })
+        )),
+        h("line", { x1: 0, y1: gy, x2: W, y2: gy, stroke: "var(--outline)", "stroke-width": 1.5, "stroke-dasharray": "5 5" }),
+        h("path", { d: `${line2}L${end[0]} ${H2}L${pts[0][0]} ${H2}Z`, fill: `url(#${id})`, stroke: "none" }),
+        h("path", { d: line2, fill: "none", stroke: "var(--primary)", "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round", class: "att-trend-line" }),
+        h("circle", { cx: end[0], cy: end[1], r: 5, fill: "var(--primary)" })
+      ));
+    };
+    if (typeof ResizeObserver === "function") new ResizeObserver(draw).observe(el);
+    requestAnimationFrame(draw);
+    return el;
+  }
 
   // src/screens/subject.js
-  var subject = () => h("div", { class: "center" }, "TODO: subject");
+  var CSS2 = SHARED_CSS + CALENDAR_CSS + `
+.att-subj .hero { display: flex; flex-direction: column; align-items: center; padding: 12px 0; }
+.att-subj .hero .big { font-size: 44px; line-height: 48px; letter-spacing: -1.5px; }
+.att-subj .hero .of { font-size: 14px; line-height: 20px; font-weight: 600; }
+.att-subj .hero .none { color: var(--on-surface-variant); }
+.att-subj .hero .after { margin-top: 16px; text-align: center; }
+.att-verdict { position: relative; isolation: isolate; display: inline-block; border-radius: 999px; padding: 8px 16px; font-size: 14px; line-height: 20px; font-weight: 600; text-align: center; }
+.att-verdict::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: .14; z-index: -1; }
+.att-verdict.good { color: var(--good); }
+.att-verdict.bad { color: var(--error); }
+.att-verdict.warn { color: var(--warn); }
+.att-subj .grade { margin-top: 12px; font-size: 16px; line-height: 24px; font-weight: 600; }
+.att-subj .gradeletter { position: relative; isolation: isolate; width: 120px; height: 120px; border-radius: 36px; display: grid; place-items: center; font-size: 50px; font-weight: 700; font-variation-settings: 'ROND' 100; }
+.att-subj .gradeletter::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: .14; z-index: -1; }
+.att-subj .gradesub { margin-top: 12px; font-size: 16px; line-height: 24px; font-weight: 600; color: var(--on-surface-variant); }
+.att-comp { display: flex; flex-direction: column; gap: 8px; }
+.att-comp .row { background: var(--sc-low); border-radius: var(--r-md); padding: 14px; gap: 14px; }
+.att-comp .k { width: 36px; height: 36px; flex: none; border-radius: 50%; display: grid; place-items: center; background: var(--secondary-container); color: var(--on-secondary-container); font-size: 16px; font-weight: 600; }
+.att-comp .n { font-size: 15px; line-height: 20px; font-weight: 600; }
+.att-comp .t { font-size: 13px; line-height: 18px; color: var(--on-surface-variant); }
+.att-comp .p { font-size: 16px; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.att-subj .note { margin: 8px 4px 0; font-size: 13px; line-height: 18px; }
+.att-subj .section { margin-left: 4px; }
+.att-subj .att-trend { margin: 0 4px; }
+.att-day { padding: 4px 0; }
+.att-day .empty { padding: 10px 4px; font-size: 14px; line-height: 20px; color: var(--on-surface-variant); }
+.att-class { display: flex; align-items: center; gap: 16px; padding: 10px 4px; }
+.att-class .ic { flex: none; display: grid; }
+.att-class .ic.good { color: var(--good); }
+.att-class .ic.bad { color: var(--error); }
+.att-class .d { font-size: 16px; line-height: 24px; }
+.att-class .s { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
+.att-subj .credits { padding: 12px 4px; font-size: 14px; line-height: 20px; color: var(--on-surface-variant); }
+`;
+  var COMPONENT = { L: "Lecture", T: "Tutorial", P: "Practical" };
+  var GRADE_VAR = { "A+": "--g-ap", A: "--g-a", "B+": "--g-bp", B: "--g-b", "C+": "--g-cp", C: "--g-c", D: "--g-d", F: "--g-f" };
+  var gradeColor = (g) => GRADE_VAR[String(g || "").trim().toUpperCase()] ? `var(${GRADE_VAR[String(g).trim().toUpperCase()]})` : "var(--on-surface-variant)";
+  var fmt = (d) => Number(d) % 1 === 0 ? String(Math.trunc(Number(d))) : Number(d).toFixed(1);
+  var same = (a, b) => String(a ?? "").trim() === String(b ?? "").trim();
+  function verdictPill(t, target) {
+    const miss = canMiss(t, target);
+    const need = mustAttend(t, target);
+    const exact = t.attended * 100 === target * t.total;
+    const [text, cls] = need === Infinity ? [`Can't reach ${target}% any more this semester`, "bad"] : need > 0 ? [`Attend the next ${need} ${need === 1 ? "class" : "classes"} to reach ${target}%`, "bad"] : miss > 0 ? [`You can miss ${miss} ${miss === 1 ? "class" : "classes"} and stay above ${target}%`, "good"] : [`${exact ? "Exactly on" : "Just above"} ${target}%, the next absence drops you under`, "warn"];
+    return h("div", { class: ["att-verdict", cls] }, text);
+  }
+  function classRow(c) {
+    const time2 = [timeLabel(c.start), timeLabel(c.end)].filter(Boolean).join(" \u2013 ");
+    const sub = [time2, c.classType && c.classType !== "Regular" ? c.classType : null, nameCase(c.takenBy) || null].filter(Boolean).join(" \xB7 ");
+    return h(
+      "div",
+      { class: "att-class" },
+      h("span", { class: ["ic", c.present ? "good" : "bad"], "aria-label": c.present ? "Present" : "Absent" }, icon(c.present ? "check_circle" : "cancel", 22)),
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "d" }, c.date ? dayLabel(c.date) : c.datetime),
+        sub ? h("div", { class: "s" }, sub) : null
+      )
+    );
+  }
+  function subject(ctx) {
+    const { semCode = "", subjectCode: code = "" } = ctx.params || {};
+    const root = h("div", { class: "att-subj" });
+    const body = h("div");
+    root.append(h("style", null, CSS2), body);
+    const st = {
+      meta: null,
+      metaErr: null,
+      metaDone: false,
+      detail: null,
+      detailErr: null,
+      detailDone: false,
+      daily: null,
+      dailyErr: null,
+      dailyDone: false,
+      faculty: [],
+      facultyDone: false,
+      grade: null,
+      gradeDone: false
+    };
+    let askedDaily = false;
+    const draw = scheduler(paint);
+    const keep = {};
+    const attSem = () => semesters(st.meta).find((s) => s.registrationcode === semCode) || null;
+    const row = () => (st.detail?.studentattendancelist || []).find((r) => same(subjectCode(r), code)) || null;
+    function loadAttendance() {
+      st.metaErr = st.detailErr = st.dailyErr = null;
+      cached(META_KEY, api.attendanceMeta, (d) => {
+        st.meta = d;
+        loadDetail();
+        draw();
+      }).catch((e) => {
+        st.metaErr = e;
+        draw();
+      }).finally(() => {
+        st.metaDone = true;
+        if (!attSem()) {
+          st.detailDone = st.dailyDone = true;
+        }
+        draw();
+      });
+    }
+    let askedDetail = false;
+    function loadDetail() {
+      const sem = attSem();
+      if (!sem || askedDetail) return;
+      askedDetail = true;
+      cached(detailKey(semCode), () => api.attendance(sem, semNumber(st.meta)), (d) => {
+        st.detail = d;
+        loadDaily();
+        draw();
+      }).catch((e) => {
+        st.detailErr = e;
+      }).finally(() => {
+        st.detailDone = true;
+        if (!row()) st.dailyDone = true;
+        draw();
+      });
+    }
+    function loadDaily() {
+      const sem = attSem(), r = row();
+      if (!sem || !r || askedDaily) return;
+      askedDaily = true;
+      cached(dailyKey(semCode, r), () => api.dailyAttendance(sem, dailySubject(r), componentIds(r)), (d) => {
+        st.daily = d;
+        draw();
+      }).catch((e) => {
+        st.dailyErr = e;
+      }).finally(() => {
+        st.dailyDone = true;
+        draw();
+      });
+    }
+    async function loadFaculty() {
+      try {
+        if (!session()?.memberId) return;
+        const sems = await load("att:subjsems", api.subjectSemesters, 12 * 36e5);
+        const s = (sems?.registrations || []).find((x) => x.registrationcode === semCode);
+        if (!s) return;
+        const res = await load(`att:faculty:${semCode}`, () => api.registeredSubjects(s), 6 * 36e5);
+        st.faculty = (res?.registrations || []).filter((f) => same(f.subjectcode, code));
+      } catch {
+      } finally {
+        st.facultyDone = true;
+        draw();
+      }
+    }
+    async function loadGrade() {
+      try {
+        const sems = await load("att:gcsems", api.gradeCardSemesters, 12 * 36e5);
+        const s = (sems?.registrations || []).find((x) => x.registrationcode === semCode);
+        if (!s) return;
+        const program = (await load("att:program", api.program, 24 * 36e5))?.studentinfo;
+        if (!program) return;
+        const gc = await load(`att:gc:${semCode}`, () => api.gradeCard(s, program), 6 * 36e5);
+        st.grade = (gc?.gradecard || []).find((g) => same(g.subjectcode, code)) || null;
+      } catch {
+      } finally {
+        st.gradeDone = true;
+        draw();
+      }
+    }
+    const retry = () => {
+      askedDetail = askedDaily = false;
+      st.metaDone = st.detailDone = st.dailyDone = false;
+      loadAttendance();
+      draw();
+    };
+    function paint() {
+      const target = Number(prefs.get("target")) || 75;
+      const r = row();
+      const f0 = st.faculty[0];
+      const name = r ? subjectName(r) : f0?.subjectdesc || st.grade?.subjectdesc || null;
+      const back = () => ctx.nav.back();
+      const settled = st.metaDone && st.detailDone && st.facultyDone && st.gradeDone;
+      if (!name) {
+        const err = st.detailErr || st.metaErr;
+        render(
+          body,
+          header({ title: "", back }),
+          !settled ? spinner() : err && !err.stale ? errorState(err, retry) : emptyState("Nothing here", "This subject isn't in the portal's attendance, subjects or grades for that semester.")
+        );
+        return;
+      }
+      const classes = st.daily ? classesOf(st.daily) : [];
+      const t = tally(classes);
+      const credits = f0?.credits ?? st.grade?.coursecreditpoint ?? null;
+      const facultyBy = {};
+      for (const f of st.faculty) {
+        const nm = String(f.employeename || "").trim().replace(/\s+/g, " ");
+        if (f.subjectcomponentcode) facultyBy[f.subjectcomponentcode] = nm;
+      }
+      const stale = [st.dailyErr, st.detailErr, st.metaErr].find((e) => e?.stale);
+      const out = [header({ title: titleCase(name), subtitle: `${String(code).trim()} \xB7 ${semLabel(semCode)}`, back })];
+      if (stale) out.push(staleBanner(stale));
+      if (r) {
+        const percent = portalPercent(r) ?? 0;
+        const started = t.total > 0 || percent > 0;
+        const sig = JSON.stringify([target, started, percent, t.total > 0 && t]);
+        if (!keep.ring || keep.ringSig !== sig) {
+          const mk = keep.ring ? stillRing : ring;
+          keep.ring = mk(
+            { percent: started ? percent : 0, target, size: 184, stroke: 16, shortfall: true },
+            h(
+              "div",
+              null,
+              h("div", { class: ["att-num", "big", !started && "none"] }, started ? `${Math.round(percent)}%` : "\u2013"),
+              t.total > 0 ? h("div", { class: "of" }, `${t.attended} of ${t.total}`) : null
+            )
+          );
+          keep.ringSig = sig;
+        }
+        const g = st.grade?.grade && String(st.grade.grade).trim();
+        out.push(h(
+          "div",
+          { class: "hero" },
+          keep.ring,
+          t.total > 0 ? h("div", { class: "after" }, verdictPill(t, target)) : !started && st.dailyDone ? h("div", { class: "after label muted" }, "No classes marked yet") : null,
+          g ? h("div", { class: "grade", style: { color: gradeColor(g) } }, `Grade ${g}`) : null
+        ));
+      } else {
+        const g = String(st.grade?.grade ?? "").trim();
+        const bits = [
+          credits != null && Number(credits) > 0 ? `${fmt(credits)} credits` : null,
+          Number(st.grade?.gradepoint) > 0 ? `${fmt(st.grade.gradepoint)} grade points` : null
+        ].filter(Boolean);
+        out.push(h(
+          "div",
+          { class: "hero" },
+          h("div", { class: "gradeletter", style: { color: gradeColor(g) }, "aria-label": `Grade ${g || "not out"}` }, g || "\u2013"),
+          h("div", { class: "gradesub" }, bits.join(" \xB7 ") || "Grade not out yet")
+        ));
+      }
+      if (r) {
+        const rows2 = componentTags(r);
+        if (rows2.length) {
+          out.push(
+            section("Components"),
+            h("div", { class: "att-comp" }, rows2.map(([k, pct]) => h(
+              "div",
+              { class: "row" },
+              h("div", { class: "k" }, k),
+              h(
+                "div",
+                { class: "grow" },
+                h("div", { class: "n" }, COMPONENT[k]),
+                facultyBy[k] ? h("div", { class: "t" }, nameCase(facultyBy[k])) : null
+              ),
+              pct != null ? h("div", { class: "p" }, `${Math.round(pct)}%`) : null
+            ))),
+            note("Component percentages are the portal's own, updated once a day.")
+          );
+        }
+      } else if (st.faculty.length) {
+        const seen = /* @__PURE__ */ new Set();
+        const teachers = st.faculty.filter((f) => String(f.employeename || "").trim() && !seen.has(f.subjectcomponentcode) && seen.add(f.subjectcomponentcode));
+        if (teachers.length) {
+          out.push(section("Taught by"), h("div", { class: "group" }, teachers.map((f) => h("div", { class: "kv" }, h("span", { class: "k" }, COMPONENT[f.subjectcomponentcode] || f.subjectcomponentcode), h("span", { class: "v" }, nameCase(f.employeename))))));
+        }
+      }
+      const marks2 = calendar(classes);
+      if (marks2.size) {
+        const sig = JSON.stringify([...marks2]);
+        if (!keep.cal || keep.calSig !== sig) {
+          const today = isoDay(now());
+          keep.day = h("div", { class: "att-day" });
+          const dayPanel = keep.day;
+          keep.cal = monthCalendar(marks2, today, (iso) => {
+            if (!iso) {
+              render(dayPanel);
+              return;
+            }
+            const list = classesOf(st.daily).filter((c) => c.date === iso);
+            render(dayPanel, list.length ? list.map(classRow) : h("div", { class: "empty" }, iso > isoDay(now()) ? `Nothing marked yet for ${dayLabel(iso)}` : `No class on ${dayLabel(iso)}`));
+          });
+          keep.calSig = sig;
+        }
+        out.push(section("Calendar"), keep.cal, keep.day);
+      }
+      const points = trend(classes).map(([, v]) => v);
+      if (points.length >= 3) {
+        const sig = JSON.stringify([points, target]);
+        if (!keep.trend || keep.trendSig !== sig) {
+          keep.trend = trendChart(points, target);
+          keep.trendSig = sig;
+        }
+        out.push(section("How it's been going"), keep.trend);
+      }
+      if (r && st.faculty.length) {
+        out.push(h("div", { class: "credits" }, `${fmt(f0.credits ?? 0)} credits${f0.audtsubject === "Y" ? " \xB7 audit" : ""}`));
+      }
+      if (classes.length) {
+        const newestFirst = chronological(classes).reverse().concat(classes.filter((c) => !c.date));
+        out.push(section("Every class"), h("div", null, newestFirst.map(classRow)));
+      } else if (r && !st.dailyDone) {
+        out.push(h("div", { style: { display: "grid", placeItems: "center", padding: "32px 0" } }, h("div", { class: "spinner" })));
+      } else if (r && st.dailyErr && !st.dailyErr.stale) {
+        out.push(errorState(st.dailyErr, retry));
+      }
+      render(body, ...out);
+    }
+    const off = prefs.onChange((k) => {
+      if (!root.isConnected) off();
+      else if (k === "target") draw();
+    });
+    paint();
+    loadAttendance();
+    loadFaculty();
+    loadGrade();
+    return root;
+  }
 
-  // src/screens/academics.js
-  var academics = () => h("div", { class: "center" }, "TODO: academics");
+  // src/core/marks/pdf.js
+  var MarksParseError = class extends Error {
+    constructor(message, cause) {
+      super(message);
+      this.name = "MarksParseError";
+      if (cause) this.cause = cause;
+    }
+  };
+  var NULL = Object.freeze({ t: "null" });
+  var num2 = (v) => ({ t: "num", v });
+  var kw = (v) => ({ t: "kw", v });
+  var isKw = (o, v) => !!o && o.t === "kw" && (v === void 0 || o.v === v);
+  var dictGet = (d, k) => d && d.t === "dict" ? d.map.get(k) : void 0;
+  var latin1 = (d, start2, end) => {
+    let s = "";
+    for (let i = start2; i < end; i++) s += String.fromCharCode(d[i]);
+    return s;
+  };
+  var OBJ = /(\d+)\s+\d+\s+obj\b/g;
+  var ENDSTREAM = Uint8Array.from("endstream", (c) => c.charCodeAt(0));
+  var isWs = (c) => /[\t\n\x0B\f\r\x1C-\x20\x85\xA0]/.test(c);
+  var PdfReader = class {
+    constructor(data) {
+      this.data = data;
+      this.offsets = /* @__PURE__ */ new Map();
+      this.cache = /* @__PURE__ */ new Map();
+      const text = latin1(data, 0, data.length);
+      OBJ.lastIndex = 0;
+      let m;
+      while (m = OBJ.exec(text)) {
+        const before = m.index === 0 ? "\n" : text[m.index - 1];
+        if (isWs(before) || before === ">" || before === ")" || before === "]") {
+          this.offsets.set(parseInt(m[1], 10), m.index + m[0].length);
+        }
+      }
+    }
+    resolve(o) {
+      return o && o.t === "ref" ? this.obj(o.num) : o;
+    }
+    obj(n) {
+      if (this.cache.has(n)) return this.cache.get(n);
+      const at2 = this.offsets.get(n);
+      if (at2 === void 0) return void 0;
+      const data = this.data;
+      const lx = new Lexer(data, at2);
+      const value = lx.readObject();
+      if (!value) return void 0;
+      let result2 = value;
+      if (value.t === "dict" && lx.peekKeyword() === "stream") {
+        lx.readKeyword();
+        let start2 = lx.pos;
+        if (start2 < data.length && data[start2] === 13) start2++;
+        if (start2 < data.length && data[start2] === 10) start2++;
+        const len = this.resolve(dictGet(value, "Length"));
+        const declared = len && len.t === "num" ? Math.trunc(len.v) : null;
+        let end;
+        if (declared != null && start2 + declared <= data.length && this.#looksLikeEnd(start2 + declared)) {
+          end = start2 + declared;
+        } else {
+          const i = this.#indexOf(ENDSTREAM, start2);
+          end = i < 0 ? data.length : this.#trimEol(start2, i);
+        }
+        result2 = { t: "stream", dict: value, raw: data.slice(start2, end) };
+      }
+      this.cache.set(n, result2);
+      return result2;
+    }
+    #looksLikeEnd(at2) {
+      const d = this.data;
+      let i = at2;
+      while (i < d.length && (d[i] === 13 || d[i] === 10 || d[i] === 32)) i++;
+      return this.#startsWith(ENDSTREAM, i);
+    }
+    #trimEol(start2, end) {
+      let e = end;
+      if (e > start2 && this.data[e - 1] === 10) e--;
+      if (e > start2 && this.data[e - 1] === 13) e--;
+      return e;
+    }
+    #startsWith(needle, at2) {
+      const d = this.data;
+      if (at2 + needle.length > d.length) return false;
+      for (let k = 0; k < needle.length; k++) if (d[at2 + k] !== needle[k]) return false;
+      return true;
+    }
+    #indexOf(needle, from) {
+      for (let i = from; i <= this.data.length - needle.length; i++) if (this.#startsWith(needle, i)) return i;
+      return -1;
+    }
+    async decode(stream) {
+      const f = this.resolve(dictGet(stream.dict, "Filter"));
+      let filters = [];
+      if (f && f.t === "name") filters = [f.v];
+      else if (f && f.t === "array") filters = f.items.map((it) => this.resolve(it)).filter((x) => x && x.t === "name").map((x) => x.v);
+      let bytes2 = stream.raw;
+      for (const name of filters) {
+        if (name === "FlateDecode" || name === "Fl") bytes2 = await inflate(bytes2);
+        else throw new MarksParseError(`unsupported filter ${name}`);
+      }
+      return bytes2;
+    }
+    /** page dicts in reading order */
+    pages() {
+      let catalog = null;
+      for (const n of [...this.offsets.keys()].sort((a, b) => a - b)) {
+        const o = this.obj(n);
+        const type = dictGet(o, "Type");
+        if (o && o.t === "dict" && type && type.t === "name" && type.v === "Catalog") {
+          catalog = o;
+          break;
+        }
+      }
+      if (!catalog) throw new MarksParseError("no catalog");
+      const out = [];
+      const walk = (node, depth) => {
+        if (depth > 32) return;
+        const type = dictGet(node, "Type");
+        if (type && type.t === "name" && type.v === "Pages") {
+          const kids = this.resolve(dictGet(node, "Kids"));
+          if (kids && kids.t === "array") {
+            for (const k of kids.items) {
+              const kid = this.resolve(k);
+              if (kid && kid.t === "dict") walk(kid, depth + 1);
+            }
+          }
+        } else out.push(node);
+      };
+      const root = this.resolve(dictGet(catalog, "Pages"));
+      if (root && root.t === "dict") walk(root, 0);
+      return out;
+    }
+    async contents(page) {
+      const c = this.resolve(dictGet(page, "Contents"));
+      let parts = [];
+      if (c && c.t === "stream") parts = [c];
+      else if (c && c.t === "array") parts = c.items.map((it) => this.resolve(it)).filter((x) => x && x.t === "stream");
+      const chunks = [];
+      for (const p of parts) {
+        chunks.push(await this.decode(p));
+        chunks.push(Uint8Array.of(10));
+      }
+      return concat(chunks);
+    }
+  };
+  function concat(chunks) {
+    let n = 0;
+    for (const c of chunks) n += c.length;
+    const out = new Uint8Array(n);
+    let o = 0;
+    for (const c of chunks) {
+      out.set(c, o);
+      o += c.length;
+    }
+    return out;
+  }
+  async function inflate(input) {
+    if (typeof DecompressionStream === "undefined") throw new MarksParseError("this browser cannot read the marks pdf (needs iOS 16.4+)");
+    const ds = new DecompressionStream("deflate");
+    const writer = ds.writable.getWriter();
+    writer.write(input).catch(() => {
+    });
+    writer.close().catch(() => {
+    });
+    const reader = ds.readable.getReader();
+    const chunks = [];
+    let size = 0;
+    try {
+      for (; ; ) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        size += value.length;
+      }
+    } catch (e) {
+      if (size === 0) throw new MarksParseError("bad flate stream", e);
+    }
+    return concat(chunks);
+  }
+  var isWhite = (c) => c === 0 || c === 9 || c === 10 || c === 12 || c === 13 || c === 32;
+  var isDelim = (c) => c === 40 || c === 41 || c === 60 || c === 62 || c === 91 || c === 93 || c === 123 || c === 125 || c === 47 || c === 37;
+  var isDigit = (c) => c >= 48 && c <= 57;
+  var Lexer = class {
+    constructor(d, pos = 0) {
+      this.d = d;
+      this.pos = pos;
+    }
+    #ch(i = this.pos) {
+      return i < this.d.length ? this.d[i] : -1;
+    }
+    #skipSpace() {
+      const d = this.d;
+      while (this.pos < d.length) {
+        const c = this.#ch();
+        if (isWhite(c)) this.pos++;
+        else if (c === 37) {
+          while (this.pos < d.length && this.#ch() !== 10 && this.#ch() !== 13) this.pos++;
+        } else break;
+      }
+    }
+    get atEnd() {
+      this.#skipSpace();
+      return this.pos >= this.d.length;
+    }
+    peekKeyword() {
+      const save = this.pos;
+      const t = this.next();
+      this.pos = save;
+      return t && t.t === "kw" ? t.v : null;
+    }
+    readKeyword() {
+      const t = this.next();
+      return t && t.t === "kw" ? t.v : null;
+    }
+    /** one full object, refs folded in */
+    readObject() {
+      const t = this.next();
+      if (!t) return null;
+      if (t.t === "kw") {
+        if (t.v === "<<") return this.#readDict();
+        if (t.v === "[") return this.#readArray();
+        return t;
+      }
+      if (t.t === "num") {
+        const save = this.pos;
+        const g = this.next();
+        const r = this.next();
+        if (g && g.t === "num" && r && r.t === "kw" && r.v === "R") return { t: "ref", num: Math.trunc(t.v), gen: Math.trunc(g.v) };
+        this.pos = save;
+        return t;
+      }
+      return t;
+    }
+    #readDict() {
+      const m = /* @__PURE__ */ new Map();
+      for (; ; ) {
+        const k = this.readObject();
+        if (!k) break;
+        if (isKw(k, ">>")) break;
+        if (k.t !== "name") continue;
+        const v = this.readObject();
+        if (!v) break;
+        if (isKw(v, ">>")) break;
+        m.set(k.v, v);
+      }
+      return { t: "dict", map: m };
+    }
+    #readArray() {
+      const items = [];
+      for (; ; ) {
+        const o = this.readObject();
+        if (!o) break;
+        if (isKw(o, "]")) break;
+        items.push(o);
+      }
+      return { t: "array", items };
+    }
+    /** raw token, dict/array brackets come back as keywords */
+    next() {
+      this.#skipSpace();
+      const d = this.d;
+      if (this.pos >= d.length) return null;
+      const c = this.#ch();
+      if (c === 47) {
+        this.pos++;
+        let s = "";
+        while (this.pos < d.length && !isWhite(this.#ch()) && !isDelim(this.#ch())) {
+          if (this.#ch() === 35 && this.pos + 2 < d.length) {
+            const hex = String.fromCharCode(d[this.pos + 1], d[this.pos + 2]);
+            if (/^[+-]?[0-9a-fA-F]+$/.test(hex)) {
+              s += String.fromCharCode(parseInt(hex, 16) & 65535);
+              this.pos += 3;
+              continue;
+            }
+          }
+          s += String.fromCharCode(this.#ch());
+          this.pos++;
+        }
+        return { t: "name", v: s };
+      }
+      if (c === 40) return { t: "str", bytes: this.#literal() };
+      if (c === 60 && this.#ch(this.pos + 1) === 60) {
+        this.pos += 2;
+        return kw("<<");
+      }
+      if (c === 62 && this.#ch(this.pos + 1) === 62) {
+        this.pos += 2;
+        return kw(">>");
+      }
+      if (c === 60) return { t: "str", bytes: this.#hex() };
+      if (c === 91 || c === 93 || c === 123 || c === 125) {
+        this.pos++;
+        return kw(String.fromCharCode(c));
+      }
+      if (c === 43 || c === 45 || c === 46 || isDigit(c)) return this.#number();
+      const start2 = this.pos;
+      while (this.pos < d.length && !isWhite(this.#ch()) && !isDelim(this.#ch())) this.pos++;
+      if (this.pos === start2) this.pos++;
+      const word = latin1(d, start2, this.pos);
+      if (word === "true") return { t: "bool", v: true };
+      if (word === "false") return { t: "bool", v: false };
+      if (word === "null") return NULL;
+      return kw(word);
+    }
+    #number() {
+      const start2 = this.pos;
+      this.pos++;
+      while (this.pos < this.d.length && (isDigit(this.#ch()) || this.#ch() === 46)) this.pos++;
+      const s = latin1(this.d, start2, this.pos);
+      if (/^[+-]?(\d+\.?\d*|\.\d+)$/.test(s)) return num2(Number(s));
+      return kw(s);
+    }
+    #literal() {
+      const d = this.d;
+      this.pos++;
+      const out = [];
+      let depth = 1;
+      while (this.pos < d.length) {
+        const c = this.#ch();
+        this.pos++;
+        if (c === 40) {
+          depth++;
+          out.push(c);
+        } else if (c === 41) {
+          depth--;
+          if (depth === 0) break;
+          out.push(c);
+        } else if (c === 92) {
+          const e = this.#ch();
+          this.pos++;
+          if (e === 110) out.push(10);
+          else if (e === 114) out.push(13);
+          else if (e === 116) out.push(9);
+          else if (e === 98) out.push(8);
+          else if (e === 102) out.push(12);
+          else if (e === 13) {
+            if (this.#ch() === 10) this.pos++;
+          } else if (e === 10) {
+          } else if (e >= 48 && e <= 55) {
+            let v = e - 48;
+            for (let k = 0; k < 2; k++) {
+              const o = this.#ch();
+              if (o >= 48 && o <= 55) {
+                v = v * 8 + (o - 48);
+                this.pos++;
+              }
+            }
+            out.push(v & 255);
+          } else if (e >= 0) out.push(e);
+        } else out.push(c);
+      }
+      return Uint8Array.from(out);
+    }
+    #hex() {
+      const d = this.d;
+      this.pos++;
+      let digits = "";
+      while (this.pos < d.length && this.#ch() !== 62) {
+        const ch = String.fromCharCode(this.#ch());
+        if (/[0-9A-Za-z\xAA\xB5\xBA\xC0-\xD6\xD8-\xF6\xF8-\xFF]/.test(ch)) digits += ch;
+        this.pos++;
+      }
+      this.pos++;
+      if (digits.length % 2 === 1) digits += "0";
+      const out = new Uint8Array(digits.length / 2);
+      for (let i = 0; i < out.length; i++) {
+        const v = parseInt(digits.substr(i * 2, 2), 16);
+        if (Number.isNaN(v) || !/^[0-9a-fA-F]{2}$/.test(digits.substr(i * 2, 2))) throw new MarksParseError("bad hex string");
+        out[i] = v;
+      }
+      return out;
+    }
+  };
 
-  // src/screens/gradecard.js
-  var gradecard = () => h("div", { class: "center" }, "TODO: gradecard");
+  // src/core/marks/scanner.js
+  var IDENTITY = [1, 0, 0, 1, 0, 0];
+  var translate = (x, y) => [1, 0, 0, 1, x, y];
+  var times = (p, m) => [
+    p[0] * m[0] + p[1] * m[2],
+    p[0] * m[1] + p[1] * m[3],
+    p[2] * m[0] + p[3] * m[2],
+    p[2] * m[1] + p[3] * m[3],
+    p[4] * m[0] + p[5] * m[2] + m[4],
+    p[4] * m[1] + p[5] * m[3] + m[5]
+  ];
+  var apply = (m, x, y) => [m[0] * x + m[2] * y + m[4], m[1] * x + m[3] * y + m[5]];
+  var HIGH = [
+    "\u20AC",
+    "\uFFFD",
+    "\u201A",
+    "\u0192",
+    "\u201E",
+    "\u2026",
+    "\u2020",
+    "\u2021",
+    "\u02C6",
+    "\u2030",
+    "\u0160",
+    "\u2039",
+    "\u0152",
+    "\uFFFD",
+    "\u017D",
+    "\uFFFD",
+    "\uFFFD",
+    "\u2018",
+    "\u2019",
+    "\u201C",
+    "\u201D",
+    "\u2022",
+    "\u2013",
+    "\u2014",
+    "\u02DC",
+    "\u2122",
+    "\u0161",
+    "\u203A",
+    "\u0153",
+    "\uFFFD",
+    "\u017E",
+    "\u0178"
+  ];
+  function winAnsi(bytes2) {
+    let s = "";
+    for (const v of bytes2) {
+      if (v >= 128 && v <= 159) s += HIGH[v - 128];
+      else if (v === 160) s += " ";
+      else s += String.fromCharCode(v);
+    }
+    return s;
+  }
+  function scan(content) {
+    const runs = [];
+    const rects = [];
+    const lx = new Lexer(content);
+    const operands = [];
+    const stack = [];
+    let ctm = IDENTITY;
+    let tm = IDENTITY;
+    let tlm = IDENTITY;
+    let leading = 0;
+    let fontSize = 0;
+    let fresh = true;
+    const n = (i) => operands[i] && operands[i].t === "num" ? operands[i].v : 0;
+    const last = () => operands[operands.length - 1];
+    const moveLine = (tx, ty) => {
+      tlm = times(translate(tx, ty), tlm);
+      tm = tlm;
+      fresh = true;
+    };
+    const show = (bytes2) => {
+      const s = winAnsi(bytes2);
+      if (!fresh && runs.length) {
+        const prev = runs.pop();
+        runs.push({ ...prev, text: prev.text + s });
+      } else {
+        const [x, y] = apply(times(tm, ctm), 0, 0);
+        runs.push({ x, y, text: s, size: fontSize * Math.abs(tm[3]) });
+      }
+      fresh = false;
+    };
+    for (; ; ) {
+      const t = lx.next();
+      if (!t) break;
+      if (t.t !== "kw") {
+        operands.push(t);
+        continue;
+      }
+      switch (t.v) {
+        case "[": {
+          const items = [];
+          for (; ; ) {
+            const x = lx.next();
+            if (!x || isKw(x, "]")) break;
+            items.push(x);
+          }
+          operands.push({ t: "array", items });
+          continue;
+        }
+        case "<<": {
+          let depth = 1;
+          while (depth > 0) {
+            const x = lx.next();
+            if (!x) break;
+            if (isKw(x, "<<")) depth++;
+            if (isKw(x, ">>")) depth--;
+          }
+          operands.push(NULL);
+          continue;
+        }
+        case "q":
+          stack.push(ctm);
+          break;
+        case "Q":
+          ctm = stack.length ? stack.pop() : IDENTITY;
+          break;
+        case "cm":
+          ctm = times([n(0), n(1), n(2), n(3), n(4), n(5)], ctm);
+          break;
+        case "re": {
+          const [x0, y0] = apply(ctm, n(0), n(1));
+          const [x1, y1] = apply(ctm, n(0) + n(2), n(1) + n(3));
+          rects.push({ x: Math.min(x0, x1), y: Math.min(y0, y1), w: Math.abs(x1 - x0), h: Math.abs(y1 - y0) });
+          break;
+        }
+        case "BT":
+          tm = IDENTITY;
+          tlm = IDENTITY;
+          fresh = true;
+          break;
+        case "ET":
+          fresh = true;
+          break;
+        case "Tf":
+          fontSize = n(1);
+          break;
+        case "TL":
+          leading = n(0);
+          break;
+        case "Tm":
+          tlm = [n(0), n(1), n(2), n(3), n(4), n(5)];
+          tm = tlm;
+          fresh = true;
+          break;
+        case "Td":
+          moveLine(n(0), n(1));
+          break;
+        case "TD":
+          leading = -n(1);
+          moveLine(n(0), n(1));
+          break;
+        case "T*":
+          moveLine(0, -leading);
+          break;
+        case "Tj": {
+          const s = last();
+          if (s && s.t === "str") show(s.bytes);
+          break;
+        }
+        case "'":
+        case '"': {
+          moveLine(0, -leading);
+          const s = last();
+          if (s && s.t === "str") show(s.bytes);
+          break;
+        }
+        case "TJ": {
+          const arr = last();
+          if (arr && arr.t === "array") {
+            const out = [];
+            for (const item of arr.items) {
+              if (item.t === "str") out.push(...item.bytes);
+              else if (item.t === "num" && item.v < -200) out.push(32);
+            }
+            show(out);
+          }
+          break;
+        }
+        case "BI":
+          skipInlineImage(lx);
+          break;
+        default:
+          break;
+      }
+      operands.length = 0;
+    }
+    return { runs, rects };
+  }
+  function skipInlineImage(lx) {
+    for (; ; ) {
+      const t = lx.next();
+      if (!t) return;
+      if (isKw(t, "ID")) break;
+    }
+    for (; ; ) {
+      const t = lx.next();
+      if (!t) return;
+      if (isKw(t, "EI")) return;
+    }
+  }
+
+  // src/core/marks/parser.js
+  var EPS = 1;
+  var S = "[ \\t\\n\\x0B\\f\\r]";
+  var CODE = new RegExp(`\\(${S}*([A-Za-z0-9./\\- ]+?)${S}*\\)${S}*$`);
+  var GENERATED = /^[A-Z][a-z]{2} [A-Z][a-z]{2} \d{1,2} \d{2}:\d{2}:\d{2} \w+ \d{4}$/;
+  var SPACES = new RegExp(`${S}+`, "g");
+  var FRACTION = new RegExp(`^(-?\\d+(?:\\.\\d+)?)${S}*/${S}*(\\d+(?:\\.\\d+)?)$`);
+  var isBlank = (s) => s.trim() === "";
+  function parseScore(text) {
+    const t = text.trim();
+    if (!t) return null;
+    if (t === "-") return { type: "na" };
+    const up = t.toUpperCase();
+    if (up === "A" || up === "AB" || up === "ABS") return { type: "absent" };
+    const m = FRACTION.exec(t);
+    if (m) return { type: "value", obtained: Number(m[1]), max: Number(m[2]) };
+    return { type: "other", raw: t };
+  }
+  var contains = (r, px, py, slack = 0.5) => px >= r.x - slack && px <= r.x + r.w + slack && py >= r.y - slack && py <= r.y + r.h + slack;
+  var right = (r) => r.x + r.w;
+  var top = (r) => r.y + r.h;
+  function joinLines(lines) {
+    let out = "";
+    for (const l of lines) {
+      const t = l.trim();
+      if (!t) continue;
+      if (out && !out.endsWith("-")) out += " ";
+      out += t;
+    }
+    return out.replace(SPACES, " ");
+  }
+  function cells(page) {
+    const seen = /* @__PURE__ */ new Set();
+    const rects = [];
+    for (const r of page.rects) {
+      if (!(r.w > 2 && r.h > 2)) continue;
+      const k = `${r.x},${r.y},${r.w},${r.h}`;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      rects.push(r);
+    }
+    const byRect = /* @__PURE__ */ new Map();
+    for (const run of page.runs) {
+      if (isBlank(run.text)) continue;
+      const px = run.x + 0.5;
+      const py = run.y + 0.5;
+      let home = null;
+      for (const r of rects) if (contains(r, px, py) && (!home || r.w * r.h < home.w * home.h)) home = r;
+      if (!home) continue;
+      if (!byRect.has(home)) byRect.set(home, []);
+      byRect.get(home).push(run);
+    }
+    return [...byRect].map(([rect, runs]) => {
+      const sorted = runs.slice().sort((a, b) => Math.round(b.y * 2) - Math.round(a.y * 2) || a.x - b.x);
+      const groups = /* @__PURE__ */ new Map();
+      for (const r of sorted) {
+        const k = Math.round(r.y * 2);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(r);
+      }
+      const lines = [...groups.values()].map((line2) => line2.map((r) => r.text.trim()).join(" ").trim()).filter((l) => l);
+      return { rect, lines, text: joinLines(lines) };
+    });
+  }
+  function findLayout(cs) {
+    const anchorCell = cs.find((c) => c.text.toLowerCase() === "subject code");
+    if (!anchorCell) return null;
+    const anchor = anchorCell.rect;
+    const headers = cs.filter((c) => Math.abs(c.rect.y - anchor.y) < EPS && Math.abs(c.rect.h - anchor.h) < EPS && c.rect.x > anchor.x + EPS).sort((a, b) => a.rect.x - b.rect.x);
+    if (!headers.length) return null;
+    const subs = cs.filter((c) => Math.abs(top(c.rect) - anchor.y) < EPS && c.rect.x >= right(anchor) - EPS);
+    const columns = [];
+    for (const s of subs) {
+      const cx = s.rect.x + s.rect.w / 2;
+      const ev = headers.findIndex((hd) => cx >= hd.rect.x - EPS && cx <= right(hd.rect) + EPS);
+      if (ev < 0) continue;
+      const label = s.text.replaceAll(" ", "").toUpperCase();
+      let weighted2;
+      if (label.startsWith("OW") || label.includes("WT")) weighted2 = true;
+      else if (label.startsWith("OM") || label.includes("FM")) weighted2 = false;
+      else continue;
+      columns.push({ event: ev, weighted: weighted2, left: s.rect.x, right: right(s.rect) });
+    }
+    if (!columns.length) headers.forEach((hd, i) => columns.push({ event: i, weighted: false, left: hd.rect.x, right: right(hd.rect) }));
+    const dataTop = subs.length ? Math.min(...subs.map((s) => s.rect.y)) : anchor.y;
+    return { anchor, events: headers.map((hd) => hd.text), columns, dataTop };
+  }
+  function rows(cs, layout, below) {
+    const a = layout.anchor;
+    const subjectCells = cs.filter((c) => Math.abs(c.rect.x - a.x) < EPS && Math.abs(c.rect.w - a.w) < EPS && top(c.rect) <= below + EPS).sort((p, q) => q.rect.y - p.rect.y);
+    const out = [];
+    for (const sc of subjectCells) {
+      const m = CODE.exec(sc.text);
+      if (!m) continue;
+      const code = m[1].replaceAll(" ", "");
+      const name = sc.text.substring(0, m.index).trim() || code;
+      const rowCells = cs.filter((c) => Math.abs(c.rect.y - sc.rect.y) < EPS && c.rect.x >= right(sc.rect) - EPS);
+      const marks2 = /* @__PURE__ */ new Map();
+      const weighted2 = /* @__PURE__ */ new Map();
+      for (const c of rowCells) {
+        const cx = c.rect.x + c.rect.w / 2;
+        const col = layout.columns.find((k) => cx >= k.left - EPS && cx <= k.right + EPS);
+        if (!col) continue;
+        const score = parseScore(c.text);
+        (col.weighted ? weighted2 : marks2).set(col.event, score);
+      }
+      const scores = [];
+      layout.events.forEach((ev, i) => {
+        const om = marks2.get(i) ?? null;
+        const ow = weighted2.get(i) ?? null;
+        if (om || ow) scores.push({ event: ev, marks: om, weighted: ow });
+      });
+      out.push({ code, name, scores });
+    }
+    return out;
+  }
+  var FIELDS = [
+    ["name", "Name"],
+    ["enrollmentNo", "Enrollment No"],
+    ["program", "Program"],
+    ["branch", "Branch"],
+    ["semester", "Semester"],
+    ["registrationCode", "Registration Code"]
+  ];
+  function mergeStudent(s, cs) {
+    const field = (key2) => {
+      const p = (key2 + ":").toLowerCase();
+      for (const c of cs) if (c.text.toLowerCase().startsWith(p)) return c.text.substring(key2.length + 1).trim();
+      return "";
+    };
+    const out = {};
+    for (const [k, label] of FIELDS) out[k] = s[k] || field(label);
+    return out;
+  }
+  var emptyStudent = () => Object.fromEntries(FIELDS.map(([k]) => [k, ""]));
+  async function parseMarks(pdf) {
+    const bytes2 = pdf instanceof Uint8Array ? pdf : new Uint8Array(pdf);
+    let reader;
+    try {
+      reader = new PdfReader(bytes2);
+    } catch (e) {
+      throw new MarksParseError("not a pdf", e);
+    }
+    const pages = [];
+    for (const p of reader.pages()) pages.push(scan(await reader.contents(p)));
+    if (!pages.length) throw new MarksParseError("no pages");
+    let layout = null;
+    const subjects2 = /* @__PURE__ */ new Map();
+    let student = emptyStudent();
+    let generated = "";
+    for (const page of pages) {
+      const cs = cells(page);
+      student = mergeStudent(student, cs);
+      if (!generated) generated = page.runs.map((r) => r.text.trim()).find((t) => GENERATED.test(t)) || "";
+      const found = findLayout(cs);
+      const active = found || layout;
+      if (!active) continue;
+      layout = active;
+      const below = found ? found.dataTop : Number.MAX_VALUE;
+      for (const s of rows(cs, active, below)) {
+        const a = subjects2.get(s.code);
+        if (!a) subjects2.set(s.code, s);
+        else subjects2.set(s.code, { ...a, scores: [...a.scores, ...s.scores.filter((x) => !a.scores.some((y) => y.event === x.event))] });
+      }
+    }
+    if (!layout) return { student, events: [], subjects: [], generated };
+    return { student, events: layout.events, subjects: [...subjects2.values()], generated };
+  }
 
   // src/screens/marks.js
-  var marks = () => h("div", { class: "center" }, "TODO: marks");
+  var CSS3 = `
+.mk-pick { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 12px; min-height: 40px; }
+.mk-list { display: flex; flex-direction: column; gap: 10px; }
+.mk-sum { background: var(--primary-container); color: var(--on-primary-container); border-radius: var(--r-xl); padding: 20px; margin: 4px 0 3px; }
+.mk-sum .lbl { font-size: 14px; line-height: 20px; font-weight: 600; letter-spacing: .1px; }
+.mk-sum .row { display: flex; align-items: flex-end; gap: 0; }
+.mk-sum .number { font-variant-numeric: normal; }
+.mk-sum .of { font-size: 16px; line-height: 24px; font-weight: 600; padding: 0 0 6px 4px; }
+.mk-sum .pct { margin-left: auto; font-size: 24px; line-height: 32px; font-weight: 700; font-variation-settings: 'ROND' 100; padding-bottom: 4px; }
+.mk-card { display: block; width: 100%; text-align: left; background: var(--sc-low); border-radius: var(--r-lg); padding: 16px; color: var(--on-surface); }
+.mk-card:active { filter: brightness(0.97); }
+.mk-top { display: flex; align-items: flex-start; gap: 12px; }
+.mk-name { font-size: 16px; line-height: 24px; font-weight: 600; letter-spacing: .15px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.mk-code { font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: .5px; color: var(--on-surface-variant); }
+.mk-tot { flex: none; text-align: right; }
+.mk-got { font-size: 24px; line-height: 32px; font-weight: 700; font-variation-settings: 'ROND' 100; }
+.mk-so { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .5px; color: var(--on-surface-variant); }
+.mk-bar { display: flex; height: 6px; margin-top: 10px; }
+.mk-bar .ind { height: 6px; border-radius: 3px; flex: none; }
+.mk-bar .trk { height: 6px; border-radius: 3px; flex: 1; background: var(--secondary-container); margin-left: 4px; }
+.mk-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.mk-chip { background: var(--sc-high); border-radius: var(--r-md); padding: 10px 14px; min-width: 0; max-width: 100%; }
+.mk-ev { font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: .5px; color: var(--on-surface-variant); overflow-wrap: anywhere; }
+.mk-val { display: flex; align-items: flex-end; gap: 4px; }
+.mk-main { font-size: 24px; line-height: 32px; font-weight: 700; font-variation-settings: 'ROND' 100; }
+.mk-sub { font-size: 12px; line-height: 16px; font-weight: 600; letter-spacing: .5px; padding-bottom: 4px; }
+`;
+  function fmt2(d) {
+    if (d % 1 === 0) return String(d);
+    const r = Math.round(Math.abs(d) * 10 + 1e-9) / 10;
+    return (d < 0 ? "-" : "") + r.toFixed(1);
+  }
+  var band = (f) => f >= 0.8 ? 0 : f >= 0.6 ? 1 : f >= 0.4 ? 2 : 3;
+  var bar = (f) => `var(--m${band(f)})`;
+  var ink = (f) => `var(--m${band(f)}-ink)`;
+  var weighted = (s) => s.scores.map((e) => e.weighted).filter((w) => w && w.type === "value");
+  var sum = (xs, k) => xs.reduce((a, x) => a + x[k], 0);
+  function friendly(e) {
+    if (e instanceof MarksParseError) return Object.assign(new Error("Couldn't read the marks PDF from the portal"), { stale: e.stale, at: e.at });
+    return e;
+  }
+  function summary(report) {
+    const all = report.subjects.flatMap(weighted);
+    const got = sum(all, "obtained");
+    const max = sum(all, "max");
+    return h(
+      "div",
+      { class: "mk-sum" },
+      h("div", { class: "lbl" }, "So far, all subjects"),
+      h(
+        "div",
+        { class: "row" },
+        h("span", { class: "number" }, fmt2(got)),
+        h("span", { class: "of" }, `of ${fmt2(max)}`),
+        max > 0 ? h("span", { class: "pct" }, `${Math.trunc(got * 100 / max)}%`) : null
+      )
+    );
+  }
+  function scoreChip(e) {
+    const m = e.marks;
+    let main = "\u2013", sub = "", tint = null;
+    if (m && m.type === "value") {
+      main = fmt2(m.obtained);
+      sub = `of ${fmt2(m.max)}`;
+      if (m.max > 0) tint = ink(m.obtained / m.max);
+    } else if (m && m.type === "absent") {
+      main = "A";
+      sub = "absent";
+      tint = "var(--error)";
+    }
+    return h(
+      "div",
+      { class: "mk-chip" },
+      h("div", { class: "mk-ev" }, e.event),
+      h(
+        "div",
+        { class: "mk-val" },
+        h("span", { class: "mk-main", style: tint ? { color: tint } : null }, main),
+        sub ? h("span", { class: "mk-sub" }, sub) : null
+      )
+    );
+  }
+  function subjectCard2(s, code, nav) {
+    const isNa = (x) => x && x.type === "na";
+    const shown = s.scores.filter((e) => !isNa(e.marks) || !isNa(e.weighted));
+    const w = weighted(s);
+    const got = sum(w, "obtained");
+    const max = sum(w, "max");
+    const f = max > 0 ? Math.min(1, Math.max(0, got / max)) : 0;
+    return h(
+      "button",
+      { class: "mk-card", onclick: () => code && nav?.push("subject", { semCode: code, subjectCode: s.code }) },
+      h(
+        "div",
+        { class: "mk-top" },
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "mk-name" }, titleCase(s.name)),
+          h("div", { class: "mk-code" }, s.code)
+        ),
+        max > 0 ? h(
+          "div",
+          { class: "mk-tot" },
+          h("div", { class: "mk-got" }, fmt2(got)),
+          h("div", { class: "mk-so" }, `of ${fmt2(max)} so far`)
+        ) : null
+      ),
+      max > 0 ? h(
+        "div",
+        { class: "mk-bar", role: "progressbar", "aria-valuenow": Math.round(f * 100), "aria-valuemin": 0, "aria-valuemax": 100 },
+        f > 0 ? h("div", { class: "ind", style: { width: `calc((100% - ${f < 1 ? 4 : 0}px) * ${f})`, background: bar(got / max) } }) : null,
+        f < 1 ? h("div", { class: "trk", style: f > 0 ? null : { marginLeft: "0" } }) : null
+      ) : null,
+      shown.length ? h("div", { class: "mk-chips" }, shown.map(scoreChip)) : null
+    );
+  }
+  function marksContent(ctx, startCode) {
+    const pick = h("div", { class: "mk-pick" });
+    const stale = h("div");
+    const body = h("div", null, skeletons(1, 136), h("div", { style: { height: "12px" } }), skeletons(3, 150));
+    const root = h("div", { class: "mk" }, h("style", null, CSS3), pick, stale, body);
+    let sems = [];
+    let picked2 = startCode || null;
+    let token = 0;
+    let lastAt = 0;
+    const drawPick = (sem, at2) => {
+      if (!sem) {
+        render(pick);
+        pick.style.display = "none";
+        return;
+      }
+      pick.style.display = "";
+      render(
+        pick,
+        semChip({ sems, value: sem.registrationcode, filled: true, onChange: (s) => {
+          if (s) {
+            picked2 = s.registrationcode;
+            loadReport();
+          }
+        } }),
+        at2 ? updated(at2) : null
+      );
+    };
+    const showReport = (report) => {
+      if (!report.subjects.length) {
+        render(body, emptyState("No marks uploaded yet"));
+        return;
+      }
+      render(body, h(
+        "div",
+        { class: "mk-list" },
+        summary(report),
+        report.subjects.map((s) => subjectCard2(s, current()?.registrationcode, ctx.nav))
+      ));
+    };
+    const current = () => sems.find((s) => s.registrationcode === picked2) || sems[0] || null;
+    function loadReport() {
+      const sem = current();
+      const my = ++token;
+      render(stale);
+      if (!sem) {
+        drawPick(null);
+        render(body, emptyState("No marks uploaded yet"));
+        return;
+      }
+      lastAt = 0;
+      drawPick(sem);
+      render(body, skeletons(1, 136), h("div", { style: { height: "12px" } }), skeletons(3, 150));
+      let have = false;
+      cached(`marks:${sem.registrationcode}`, async () => parseMarks(await api.marksPdf(sem)), (report, { at: at2 }) => {
+        if (my !== token) return;
+        have = true;
+        lastAt = at2;
+        render(stale);
+        drawPick(sem, at2);
+        showReport(report);
+      }, { maxAge: 30 * 60 * 1e3 }).catch((e) => {
+        if (my !== token) return;
+        const err = friendly(e);
+        if (have || e.stale) render(stale, staleBanner(err));
+        else render(body, errorState(err, loadReport));
+      });
+    }
+    function loadSems() {
+      render(body, skeletons(1, 136), h("div", { style: { height: "12px" } }), skeletons(3, 150));
+      let started = false;
+      cached("marks:sems", () => api.marksSemesters(), (data) => {
+        sems = data?.semestercode || [];
+        const before = started ? current()?.registrationcode : null;
+        if (!sems.some((s) => s.registrationcode === picked2)) picked2 = sems[0]?.registrationcode || null;
+        if (!started || before !== current()?.registrationcode) {
+          started = true;
+          loadReport();
+        } else drawPick(current(), lastAt);
+      }, { maxAge: 6 * 60 * 60 * 1e3 }).catch((e) => {
+        if (started) return;
+        render(body, errorState(e, loadSems));
+      });
+    }
+    loadSems();
+    return root;
+  }
+  function marksPane(ctx = {}) {
+    return marksContent(ctx, ctx.code || ctx.params?.code || null);
+  }
+  function marks(ctx) {
+    return h(
+      "div",
+      null,
+      header({ title: "Marks", back: ctx.nav.back }),
+      marksContent(ctx, ctx.params?.code || null)
+    );
+  }
+
+  // src/domain/academics.js
+  var GRADES = ["A+", "A", "B+", "B", "C+", "C", "D", "F"];
+  var GRADE_POINTS = { "A+": 10, A: 9, "B+": 8, B: 7, "C+": 6, C: 5, D: 4, F: 0 };
+  function gradeColor2(letter) {
+    const g = String(letter || "").trim().toUpperCase();
+    const map = { "A+": "--g-ap", A: "--g-a", "B+": "--g-bp", B: "--g-b", "C+": "--g-cp", C: "--g-c", D: "--g-d", F: "--g-f", I: "--g-f", X: "--g-f" };
+    return map[g] ? `var(${map[g]})` : "var(--on-surface-variant)";
+  }
+  var fmt3 = (d) => {
+    const n = Number(d) || 0;
+    return n % 1 === 0 ? String(n) : n.toFixed(1);
+  };
+  var f1 = (n) => (Number(n) || 0).toFixed(1);
+  var f2 = (n) => (Number(n) || 0).toFixed(2);
+  function term(code) {
+    const m = /(\d{4})(ODD|EVE|EVEN)SEM/.exec(String(code || "").toUpperCase());
+    if (!m) return null;
+    return Number(m[1]) * 2 + (m[2] === "ODD" ? 1 : 0);
+  }
+  function numberOf(code, currentCode, currentNumber) {
+    const t = term(code);
+    const anchor = term(currentCode);
+    const n = Number(currentNumber);
+    if (t == null || anchor == null || !n) return null;
+    const v = n - (anchor - t);
+    return v > 0 ? v : null;
+  }
+  function result(r) {
+    return {
+      semester: Number(r.stynumber) || 0,
+      sgpa: Number(r.sgpa) || 0,
+      cgpa: Number(r.cgpa) || 0,
+      courseCredits: Number(r.totalcoursecredit) || 0,
+      gradePoints: Number(r.earnedgradepoints) || 0,
+      earnedCredits: Number(r.totalearnedcredit) || 0,
+      cumulativeCredits: Number(r.totalearnedcredits) || 0
+    };
+  }
+  var results = (resp) => (resp?.semesterList || []).map(result).filter((r) => r.semester > 0).sort((a, b) => a.semester - b.semester);
+  var creditsOf = (r) => r.courseCredits > 0 ? r.courseCredits : r.earnedCredits;
+  function recompute(points, keepReal) {
+    let gp = 0, cr = 0, any = false;
+    return points.map((p) => {
+      gp += p.sgpa * p.credits;
+      cr += p.credits;
+      any = any || p.projected;
+      return keepReal && !any ? p : { ...p, cgpa: cr > 0 ? gp / cr : 0 };
+    });
+  }
+  function gpaPoints(res, projections, projectedCredits, maxSemesters) {
+    const real = [...res].sort((a, b) => a.semester - b.semester).map((r) => ({ semester: r.semester, sgpa: r.sgpa, credits: creditsOf(r), cgpa: r.cgpa, projected: false }));
+    const next = (real.length ? Math.max(...real.map((p) => p.semester)) : 0) + 1;
+    const future = [];
+    for (let s = next; s <= maxSemesters; s++) {
+      if (projections[s] != null) future.push({ semester: s, sgpa: projections[s], credits: projectedCredits, cgpa: 0, projected: true });
+    }
+    return recompute(real.map((p) => projections[p.semester] != null ? { ...p, sgpa: projections[p.semester], projected: true } : p).concat(future), true);
+  }
+  function calculate(subjects2, picks, base) {
+    let pts = 0, cr = 0, picked2 = 0;
+    for (const s of subjects2) {
+      const g = picks[s.code];
+      if (g == null || GRADE_POINTS[g] == null || !(s.credits > 0)) continue;
+      pts += GRADE_POINTS[g] * s.credits;
+      cr += s.credits;
+      picked2++;
+    }
+    const sgpa = cr > 0 ? pts / cr : null;
+    let bp = 0, bc = 0;
+    for (const r of base) {
+      const c = creditsOf(r);
+      bp += r.gradePoints > 0 ? r.gradePoints : r.sgpa * c;
+      bc += c;
+    }
+    const cgpa = cr > 0 ? (bp + pts) / (bc + cr) : null;
+    return { sgpa, cgpa, credits: cr, picked: picked2, baseCgpa: bc > 0 ? bp / bc : null };
+  }
+  function foldSubjects(rows2) {
+    const by = /* @__PURE__ */ new Map();
+    for (const r of rows2 || []) {
+      const code = String(r.subjectcode || "").trim();
+      if (!code) continue;
+      const cur = by.get(code);
+      const credits = Number(r.credits) || 0;
+      if (!cur) by.set(code, { code, name: String(r.subjectdesc || "").trim(), credits, audit: r.audtsubject === "Y", components: [r.subjectcomponentcode] });
+      else {
+        cur.credits = Math.max(cur.credits, credits);
+        cur.audit = cur.audit || r.audtsubject === "Y";
+        cur.components.push(r.subjectcomponentcode);
+      }
+    }
+    return [...by.values()];
+  }
+
+  // src/screens/academics/ui.js
+  var CSS4 = `
+.acad .hd-row { display: flex; gap: 28px; padding: 0 4px; }
+.acad .big .k { font-size: 14px; line-height: 20px; font-weight: 600; color: var(--on-surface-variant); }
+.acad .big .v { font-size: 44px; line-height: 48px; font-weight: 700; letter-spacing: -1.5px; font-variation-settings: 'ROND' 100; font-variant-numeric: tabular-nums; }
+.acad .seg-wrap { position: sticky; top: calc(-1 * (var(--safe-t) + 8px)); z-index: 3; background: var(--bg); margin: -8px -16px 0; padding: 8px 16px 16px; }
+.acad .credits { display: flex; align-items: flex-end; margin-top: 16px; padding: 0 4px; }
+.acad .credits .t { font-size: 16px; line-height: 24px; font-weight: 600; margin: 0 0 6px; }
+.acad .bar { display: flex; align-items: center; gap: 4px; height: 8px; margin: 8px 4px 0; }
+.acad .bar .fill { height: 8px; border-radius: 4px; background: var(--cgpa); }
+.acad .bar .track { flex: 1; height: 8px; border-radius: 4px; background: var(--surface-variant); position: relative; }
+.acad .bar .track::after { content: ''; position: absolute; right: 2px; top: 2px; width: 4px; height: 4px; border-radius: 2px; background: var(--cgpa); }
+.acad .chart-card { background: var(--sc-low); border-radius: var(--r-lg); padding: 16px 8px; margin-top: 16px; }
+.acad .chart { position: relative; height: 220px; user-select: none; -webkit-user-select: none; }
+.acad .chart svg { position: absolute; inset: 0; overflow: visible; }
+.acad .chart .hit { position: absolute; top: 0; bottom: 0; touch-action: none; cursor: ns-resize; }
+.acad .chart-foot { display: flex; align-items: center; gap: 8px; padding: 0 12px; min-height: 40px; }
+.acad .chart-foot .body-sm { flex: 1; }
+.acad .lbl { font-size: 11px; font-weight: 600; fill: var(--on-surface-variant); font-family: var(--font); }
+
+/* the android 16 grouped list: rows a hair apart, outer corners round, inner barely */
+.acad .xg { display: flex; flex-direction: column; gap: 3px; }
+.acad .xg > .xi { background: var(--sc-low); border-radius: 6px; overflow: hidden; position: relative; }
+.acad .xg > .xi:first-child { border-top-left-radius: 24px; border-top-right-radius: 24px; }
+.acad .xg > .xi:last-child { border-bottom-left-radius: 24px; border-bottom-right-radius: 24px; }
+.acad .xi.tap { cursor: pointer; }
+.acad .xi.tap:active { background: var(--sc-high); }
+.acad .row-sem { display: flex; align-items: center; padding: 14px 12px 14px 20px; gap: 0; }
+.acad .row-sem .grow { flex: 1; min-width: 0; }
+.acad .fig { display: flex; flex-direction: column; align-items: center; }
+.acad .fig .v { font-size: 22px; line-height: 28px; font-weight: 700; font-variation-settings: 'ROND' 100; font-variant-numeric: tabular-nums; }
+.acad .fig .k { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .3px; color: var(--on-surface-variant); }
+.acad .chev { color: var(--on-surface-variant); display: grid; place-items: center; margin-left: 4px; }
+
+/* grade letter on a faint wash of its own colour */
+.acad .gl { position: relative; display: grid; place-items: center; font-weight: 700; flex: none; font-variation-settings: 'ROND' 100; }
+.acad .gl::before, .acad .gchip.on::before, .acad .wash::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: .14; pointer-events: none; }
+.acad .gl span { position: relative; }
+
+/* sgpa calculator */
+.acad .calc-sum { padding: 16px 16px 16px 20px; }
+.acad .calc-sum .hd-row { padding: 0; }
+.acad .calc-sub { padding: 14px 16px 14px 20px; }
+.acad .calc-sub .meta { display: flex; align-items: center; gap: 6px; }
+.acad .gchips { display: flex; gap: 5px; margin-top: 10px; }
+.acad .gchip { position: relative; min-width: 0; height: 34px; padding: 0; border-radius: 10px; border: 1px solid var(--outline-variant); font-size: 14px; font-weight: 700; color: var(--on-surface-variant); font-variation-settings: 'ROND' 100; flex: 1 1 0; max-width: 48px; }
+.acad .gchip.on { border-color: transparent; }
+.acad .cr-in { width: 56px; height: 30px; border-radius: 8px; border: 1px solid var(--outline); background: transparent; padding: 0 8px; font-size: 14px; font-weight: 600; }
+.acad .hint { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
+
+/* exams */
+.acad .sem-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.acad .strip { display: flex; gap: 6px; overflow-x: auto; margin: 8px -16px 0; padding: 4px 16px; scrollbar-width: none; scroll-behavior: auto; }
+.acad .strip::-webkit-scrollbar { display: none; }
+.acad .dc { flex: none; min-width: 48px; min-height: 72px; padding: 10px; border-radius: 24px; display: flex; flex-direction: column; align-items: center; color: var(--on-surface-variant); background: transparent; }
+.acad .dc.today { box-shadow: inset 0 0 0 2px var(--primary); }
+.acad .dc.exam { background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; }
+.acad .dc.done { background: var(--sc-high); color: var(--on-surface-variant); cursor: pointer; }
+.acad .dc.next { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.acad .dc .in { display: flex; flex-direction: column; align-items: center; }
+.acad .dc.dim .in { opacity: .6; }
+.acad .dc .wd { font-size: 11px; line-height: 16px; font-weight: 600; }
+.acad .dc .dn { font-size: 16px; line-height: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.acad .dc .dots { display: flex; gap: 3px; height: 6px; margin-top: 4px; }
+.acad .dc .dots i { width: 6px; height: 6px; border-radius: 3px; background: currentColor; }
+.acad .dayh { display: flex; align-items: center; padding: 12px 4px 8px; font-size: 14px; line-height: 20px; font-weight: 600; }
+.acad .dayh .grow { color: var(--on-surface-variant); }
+.acad .dayh .rel { color: var(--primary); }
+.acad .gap { display: flex; align-items: center; gap: 0; padding: 8px 16px; color: var(--on-surface-variant); font-size: 12px; font-weight: 600; }
+.acad .gap hr { flex: 1; border: 0; border-top: 1px solid var(--outline-variant); margin: 0 12px; }
+.acad .gap .ic { display: flex; align-items: center; gap: 6px; }
+.acad .paper { display: flex; align-items: stretch; padding: 0 12px 0 8px; position: relative; cursor: pointer; }
+.acad .paper.next::before { content: ''; position: absolute; inset: 0; background: var(--tertiary-container); opacity: .6; }
+.acad .paper > * { position: relative; }
+.acad .paper.done > .tb, .acad .paper.done > .txt { opacity: .6; }
+.acad .tb { width: 84px; flex: none; padding: 12px 0; text-align: right; }
+.acad .tb .c { font-size: 22px; line-height: 28px; font-weight: 700; color: var(--primary); font-variation-settings: 'ROND' 100; white-space: nowrap; letter-spacing: -0.3px; }
+.acad .tb .c small { font-size: 12px; font-weight: 600; }
+.acad .tb .to { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); white-space: nowrap; }
+.acad .rail { width: 28px; flex: none; position: relative; }
+.acad .rail i { position: absolute; left: 50%; transform: translateX(-50%); display: block; }
+.acad .rail .ln { width: 2px; background: var(--outline-variant); }
+.acad .rail .acc { width: 6px; border-radius: 3px; background: var(--tertiary); }
+.acad .rail .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--outline-variant); top: 21px; }
+.acad .rail .dot.big { width: 14px; height: 14px; top: 19px; background: var(--tertiary); }
+.acad .txt { flex: 1; min-width: 0; padding: 12px 0; }
+.acad .txt .s { font-size: 16px; line-height: 24px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.acad .txt .m { font-size: 14px; line-height: 20px; color: var(--on-surface-variant); }
+.acad .txt .clash { display: flex; align-items: center; gap: 4px; margin-top: 4px; color: var(--error); font-size: 12px; font-weight: 600; }
+.acad .seat { align-self: center; margin-left: 8px; min-width: 56px; padding: 6px 10px; border-radius: 12px; text-align: center; background: var(--secondary-container); color: var(--on-secondary-container); }
+.acad .seat .r { font-size: 14px; line-height: 20px; font-weight: 700; white-space: nowrap; }
+.acad .seat .st { font-size: 11px; line-height: 16px; font-weight: 600; white-space: nowrap; }
+.acad .seat.soon { background: transparent; border: 1px dashed var(--outline); color: var(--on-surface-variant); display: flex; flex-direction: column; align-items: center; }
+.acad .pend { display: flex; align-items: center; gap: 12px; padding: 14px 16px; }
+.acad .pend .ic { min-width: 64px; display: grid; place-items: center; color: var(--on-surface-variant); }
+.acad .doneh { display: flex; align-items: center; width: 100%; padding: 12px 0 12px 4px; margin-top: 12px; color: var(--primary); font-size: 14px; font-weight: 600; text-align: left; }
+.acad .doneh .grow { flex: 1; }
+.acad .doneh svg { transition: transform .2s; }
+.acad .doneh.open svg { transform: rotate(180deg); }
+.acad-sheet .lab { font-size: 14px; font-weight: 600; color: var(--primary); }
+.acad-sheet .fact { display: flex; gap: 16px; align-items: flex-start; }
+.acad-sheet .fact svg { flex: none; margin-top: 2px; color: var(--on-surface-variant); }
+.acad-sheet .fact.err svg { color: var(--error); }
+.acad-sheet .facts { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+.acad-sheet .acts { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 20px; }
+.acad-sheet hr { border: 0; border-top: 1px solid var(--outline-variant); margin: 20px 0; }
+
+/* grade card */
+.acad .gc-row { display: flex; align-items: center; padding: 14px 16px 14px 20px; gap: 12px; }
+.acad .gc-row .grow { flex: 1; min-width: 0; }
+.acad .gc-row .n { font-size: 16px; line-height: 24px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.acad .gc-row .cd { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); }
+.acad .gc-row .fig { margin-left: 4px; min-width: 44px; }
+`;
+  var style = () => h("style", null, CSS4);
+  function gradeLetter(grade, size = 44) {
+    const g = String(grade || "").trim();
+    return h("div", {
+      class: "gl",
+      "aria-label": `Grade ${g || "not out"}`,
+      style: { width: size + "px", height: size + "px", borderRadius: size * 0.3 + "px", color: gradeColor2(g), fontSize: Math.round(size * 0.42) + "px" }
+    }, h("span", null, g || "\u2013"));
+  }
+  var figure = (value, label, color) => h(
+    "div",
+    { class: "fig" },
+    h("div", { class: "v", style: { color } }, value),
+    h("div", { class: "k" }, label)
+  );
+  var big = (label, value, color) => h(
+    "div",
+    { class: "big" },
+    h("div", { class: "k" }, label),
+    h("div", { class: "v", style: { color } }, value)
+  );
+  var xgroup = (rows2, extra = {}) => h("div", { class: "xg", ...extra }, rows2.map((r) => r ? h("div", { class: ["xi", r.tap && "tap"], onclick: r.tap, role: r.tap ? "button" : null }, r.el) : null));
+  function scheduler2(fn) {
+    let queued = false;
+    return () => {
+      if (queued) return;
+      queued = true;
+      Promise.resolve().then(() => {
+        queued = false;
+        fn();
+      });
+    };
+  }
+  function resource(key2, fn, onChange) {
+    const r = { data: peek(key2), at: null, error: null, done: false, key: key2 };
+    const go = () => {
+      r.done = false;
+      cached(key2, fn, (d, info) => {
+        r.data = d;
+        r.at = info.at;
+        if (info.fresh) r.error = null;
+        onChange();
+      }).then(() => {
+        r.done = true;
+        onChange();
+      }).catch((e) => {
+        r.error = e;
+        r.done = true;
+        onChange();
+      });
+    };
+    r.reload = () => {
+      r.error = null;
+      go();
+      onChange();
+    };
+    go();
+    return r;
+  }
+  var NO_MEMBER = "Sign out and sign in again once so JPortal can pick up your student id.";
+  var semList = (resp, ...path) => {
+    let v = resp;
+    for (const p of path) v = v?.[p];
+    return Array.isArray(v) ? v.filter((s) => s && s.registrationcode) : [];
+  };
+
+  // src/screens/academics/data.js
+  function academicsData(onChange) {
+    let res = null;
+    let started = null;
+    let ready = false;
+    const ping = () => queueMicrotask(() => {
+      if (!ready) return;
+      kick();
+      onChange();
+    });
+    const meta = resource("acad:meta", () => api.attendanceMeta(), ping);
+    const program = resource("acad:program", () => api.program(), ping);
+    const credits = resource("acad:credits", () => api.credits(), ping);
+    const gcSems = resource("acad:gcsems", () => api.gradeCardSemesters(), ping);
+    const noMember = !session()?.memberId;
+    const stynumber = () => meta.data?.headerlist?.[0]?.stynumber || (meta.done || meta.error ? program.data?.studentinfo?.stymax : null) || null;
+    function kick() {
+      if (noMember) return;
+      const n = stynumber();
+      if (!n || String(n) === started) return;
+      started = String(n);
+      res = resource("acad:results", () => api.semesterResults(n), ping);
+    }
+    ready = true;
+    kick();
+    const cachedResults = peek("acad:results");
+    const d = {
+      meta,
+      program,
+      credits,
+      gcSems,
+      noMember,
+      get results() {
+        if (res) return res;
+        const stuck = (meta.done || meta.error) && (program.done || program.error) && !stynumber();
+        const error = stuck ? meta.error || program.error || new Error("Couldn't tell which semester you're in") : null;
+        if (error && cachedResults) error.stale = true;
+        return { data: cachedResults, error, done: stuck, reload: () => {
+          meta.reload();
+          program.reload();
+        } };
+      },
+      /** the current semester's code and number */
+      get current() {
+        const code = meta.data?.semlist?.[0]?.registrationcode || null;
+        const number = Number(meta.data?.headerlist?.[0]?.stynumber || program.data?.studentinfo?.stymax) || null;
+        return { code, number, sem: meta.data?.semlist?.[0] || null };
+      },
+      get list() {
+        return results(d.results.data);
+      },
+      /** one row per semester code we know, numbered and joined to its result */
+      get semesters() {
+        const { code: cur, number } = d.current;
+        const byNumber = new Map(d.list.map((r) => [r.semester, r]));
+        const codes = [...new Set([cur, ...semList(gcSems.data, "registrations").map((s) => s.registrationcode)].filter(Boolean))];
+        const rows2 = codes.map((code) => {
+          const n = numberOf(code, cur, number);
+          return { code, number: n, result: n ? byNumber.get(n) || null : null, current: code === cur };
+        });
+        const tied = new Set(rows2.map((r) => r.number).filter(Boolean));
+        for (const r of d.list) if (!tied.has(r.semester)) rows2.push({ code: null, number: r.semester, result: r, current: false });
+        return rows2.sort((a, b) => b.current - a.current || (b.number || 0) - (a.number || 0) || (term(b.code) || 0) - (term(a.code) || 0));
+      },
+      reload() {
+        meta.reload();
+        program.reload();
+        credits.reload();
+        gcSems.reload();
+        if (res) res.reload();
+      }
+    };
+    return d;
+  }
+
+  // src/screens/academics/chart.js
+  var H = 220;
+  var PAD = 28;
+  var TOP = 16;
+  var BOTTOM = H - 24;
+  var LO = 4;
+  var HI = 10;
+  function smooth2(p) {
+    if (!p.length) return "";
+    let d = `M${p[0][0]} ${p[0][1]}`;
+    for (let i = 1; i < p.length; i++) {
+      const [px, py] = p[i - 1], [cx, cy] = p[i];
+      d += `Q${px} ${py} ${(px + cx) / 2} ${(py + cy) / 2}`;
+      if (i === p.length - 1) d += `L${cx} ${cy}`;
+    }
+    if (p.length === 1) d += `L${p[0][0]} ${p[0][1]}`;
+    return d;
+  }
+  function gpaChart({ onProject }) {
+    const svg = h("svg", { height: H, width: "100%" });
+    const hits = h("div");
+    const el = h("div", { class: "chart", role: "img" }, svg, hits);
+    let pts = [], slots = [], dragging = null, W = 0, hitKey = "";
+    const all = () => [.../* @__PURE__ */ new Set([...pts.map((p) => p.semester), ...slots])].sort((a, b) => a - b);
+    const step = () => (W - 2 * PAD) / Math.max(1, all().length - 1);
+    const x = (s) => PAD + all().indexOf(s) * step();
+    const y = (v) => BOTTOM - (v - LO) / (HI - LO) * (BOTTOM - TOP);
+    const valueAt = (py) => {
+      const v = HI - (py - TOP) / (BOTTOM - TOP) * (HI - LO);
+      return Math.round(Math.min(HI, Math.max(LO, v)) * 10) / 10;
+    };
+    function series(color, key2) {
+      const out = [];
+      if (!pts.length) return out;
+      const xy = pts.map((p) => [x(p.semester), y(p[key2])]);
+      let realEnd = pts.findIndex((p) => p.projected);
+      if (realEnd < 0) realEnd = pts.length;
+      if (realEnd > 1) out.push(h("path", { d: smooth2(xy.slice(0, realEnd)), fill: "none", stroke: color, "stroke-width": 3, "stroke-linecap": "round", "stroke-linejoin": "round" }));
+      if (realEnd < pts.length) {
+        out.push(h("path", { d: smooth2(xy.slice(Math.max(0, realEnd - 1))), fill: "none", stroke: color, "stroke-opacity": 0.6, "stroke-width": 2.5, "stroke-linecap": "round", "stroke-dasharray": "6 4" }));
+      }
+      xy.forEach(([px, py], i) => out.push(pts[i].projected ? h("circle", { cx: px, cy: py, r: 7, fill: "var(--sc-low)", stroke: color, "stroke-width": 2.5 }) : h("circle", { cx: px, cy: py, r: 4.5, fill: color })));
+      return out;
+    }
+    function draw() {
+      W = el.clientWidth || 342;
+      const kids = [];
+      for (let g = 5; g <= 10; g++) {
+        kids.push(h("line", { x1: PAD, x2: W - PAD, y1: y(g), y2: y(g), stroke: "var(--outline-variant)", "stroke-opacity": 0.4, "stroke-width": 1 }));
+        kids.push(h("text", { class: "lbl", x: 0, y: y(g) + 4 }, String(g)));
+      }
+      for (const s of all()) kids.push(h("text", { class: "lbl", x: x(s), y: BOTTOM + 18, "text-anchor": "middle" }, `S${s}`));
+      for (const s of slots) {
+        if (pts.some((p) => p.semester === s)) continue;
+        kids.push(h("circle", { cx: x(s), cy: y(8), r: 6, fill: "none", stroke: "var(--outline-variant)", "stroke-width": 1.5, "stroke-dasharray": "2.4 2.4" }));
+      }
+      kids.push(...series("var(--cgpa)", "cgpa"), ...series("var(--sgpa)", "sgpa"));
+      if (dragging != null) {
+        const p = pts.find((q) => q.semester === dragging);
+        if (p) kids.push(h("text", { class: "lbl", x: x(dragging), y: y(p.sgpa) - 14, "text-anchor": "middle", style: { fill: "var(--sgpa)", fontSize: "12px" } }, p.sgpa.toFixed(1)));
+      }
+      render(svg, kids);
+      const last = pts.filter((p) => !p.projected).at(-1);
+      el.setAttribute("aria-label", `SGPA and CGPA by semester. Latest CGPA ${last ? last.cgpa.toFixed(2) : 0}`);
+      const key2 = `${W}|${all().join(",")}|${slots.join(",")}`;
+      if (key2 !== hitKey) {
+        hitKey = key2;
+        drawHits();
+      }
+    }
+    function drawHits() {
+      const w = Math.max(28, step());
+      render(hits, slots.map((s) => h("div", {
+        class: "hit",
+        style: { left: x(s) - w / 2 + "px", width: w + "px" },
+        "aria-label": `Semester ${s} what-if`,
+        onpointerdown: (e) => grab(e, s)
+      })));
+    }
+    function grab(e, s) {
+      const t = e.currentTarget;
+      try {
+        t.setPointerCapture(e.pointerId);
+      } catch {
+      }
+      const y0 = e.clientY;
+      let moved = false;
+      const top2 = () => svg.getBoundingClientRect().top;
+      const move = (ev) => {
+        if (!moved && Math.abs(ev.clientY - y0) < 6) return;
+        moved = true;
+        dragging = s;
+        onProject(s, valueAt(ev.clientY - top2()));
+      };
+      const up = () => {
+        t.removeEventListener("pointermove", move);
+        t.removeEventListener("pointerup", up);
+        t.removeEventListener("pointercancel", up);
+        if (!moved && !pts.some((p) => p.semester === s)) onProject(s, pts.at(-1)?.sgpa ?? 8);
+        dragging = null;
+        draw();
+      };
+      t.addEventListener("pointermove", move);
+      t.addEventListener("pointerup", up);
+      t.addEventListener("pointercancel", up);
+      e.preventDefault();
+    }
+    if (typeof ResizeObserver !== "undefined") {
+      let lastW = 0;
+      new ResizeObserver(() => {
+        if (el.clientWidth && el.clientWidth !== lastW) {
+          lastW = el.clientWidth;
+          draw();
+        }
+      }).observe(el);
+    }
+    return {
+      el,
+      update(points, futureSlots) {
+        pts = points;
+        slots = futureSlots;
+        draw();
+      }
+    };
+  }
+
+  // src/screens/academics/calc.js
+  var KEY = "jp:sgpacalc";
+  var loadAll = () => {
+    try {
+      return JSON.parse(localStorage.getItem(KEY) || "{}") || {};
+    } catch {
+      return {};
+    }
+  };
+  var saveAll = (v) => {
+    try {
+      localStorage.setItem(KEY, JSON.stringify(v));
+    } catch {
+    }
+  };
+  function sgpaCalc(d) {
+    const el = h("div");
+    let sems = null;
+    const regs = /* @__PURE__ */ new Map();
+    const update = () => draw();
+    function semester() {
+      const { code, sem } = d.current;
+      if (!code) return null;
+      if (!sems) sems = resource("acad:subjsems", () => api.subjectSemesters(), update);
+      return semList(sems.data, "registrations").find((s) => s.registrationcode === code) || (sems.done || sems.error ? sem : null);
+    }
+    function draw() {
+      if (d.noMember) {
+        render(el, section("SGPA calculator"), h("div", { class: "card body-md muted" }, NO_MEMBER));
+        return;
+      }
+      const sem = semester();
+      if (!sem) {
+        render(el, d.meta.error && !d.meta.data ? null : [section("SGPA calculator"), h("div", { class: "skeleton", style: { height: "160px" } })]);
+        return;
+      }
+      const code = sem.registrationcode;
+      if (!regs.has(code)) regs.set(code, resource("acad:regs:" + code, () => api.registeredSubjects(sem), update));
+      const r = regs.get(code);
+      const head = section("SGPA calculator");
+      if (!r.data) {
+        if (!r.error) return render(el, head, h("div", { class: "skeleton", style: { height: "160px" } }));
+        return render(el, head, h(
+          "div",
+          { class: "card" },
+          h("div", { class: "body-md muted" }, `Couldn't load this semester's subjects. ${r.error.message || ""}`),
+          h("button", { class: "btn tonal", style: { marginTop: "12px" }, onclick: r.reload }, icon("refresh", 18), "Retry")
+        ));
+      }
+      const all = foldSubjects(r.data.registrations);
+      const audits = all.filter((s) => s.audit);
+      const store = loadAll();
+      const mine = store[code] || (store[code] = { g: {}, c: {} });
+      mine.g ||= {};
+      mine.c ||= {};
+      const subjects2 = all.filter((s) => !s.audit).map((s) => ({ ...s, own: !(s.credits > 0), credits: s.credits > 0 ? s.credits : Number(mine.c[s.code]) || 0 }));
+      if (!subjects2.length) return render(el, head, h("div", { class: "card body-md muted" }, "No subjects registered for this semester yet."));
+      const { number } = d.current;
+      const base = d.list.filter((x) => !number || x.semester < number);
+      const sum2 = h("div", { class: "calc-sum" });
+      const save = () => {
+        store[code] = mine;
+        saveAll(store);
+      };
+      const drawSum = () => {
+        const c = calculate(subjects2, mine.g, base);
+        const picked2 = Object.keys(mine.g).filter((k) => subjects2.some((s) => s.code === k)).length;
+        render(
+          sum2,
+          h(
+            "div",
+            { class: "row", style: { alignItems: "flex-start" } },
+            h(
+              "div",
+              { class: "hd-row grow" },
+              big("SGPA", c.sgpa != null ? f2(c.sgpa) : "\u2013", "var(--sgpa)"),
+              base.length ? big("CGPA", c.cgpa != null ? f2(c.cgpa) : "\u2013", "var(--cgpa)") : null
+            ),
+            picked2 ? h("button", { class: "btn text", style: { height: "36px", marginRight: "-8px" }, onclick: () => {
+              mine.g = {};
+              save();
+              draw();
+            } }, "Reset") : null
+          ),
+          h(
+            "div",
+            { class: "hint", style: { marginTop: "8px" } },
+            picked2 ? `${semLabel(code)} \xB7 ${picked2} of ${subjects2.length} subjects \xB7 ${fmt3(c.credits)} credits` + (picked2 < subjects2.length ? ". The rest aren't counted yet." : "") : `Pick the grade you expect in each ${semLabel(code)} subject.` + (base.length ? " CGPA is what you'd have after this semester." : "")
+          )
+        );
+      };
+      drawSum();
+      const rows2 = subjects2.map((s) => {
+        const chips = GRADES.map((g) => h("button", {
+          class: ["gchip", mine.g[s.code] === g && "on"],
+          style: mine.g[s.code] === g ? { color: gradeColor2(g) } : null,
+          "aria-pressed": String(mine.g[s.code] === g),
+          "aria-label": `${g} in ${titleCase(s.name)}`,
+          onclick: () => {
+            if (mine.g[s.code] === g) delete mine.g[s.code];
+            else mine.g[s.code] = g;
+            save();
+            draw();
+          }
+        }, g));
+        const credit = s.own ? h("label", { class: "meta hint" }, h("input", {
+          class: "cr-in",
+          type: "number",
+          inputmode: "decimal",
+          min: "0",
+          max: "10",
+          step: "0.5",
+          placeholder: "?",
+          value: s.credits || "",
+          "aria-label": `Credits for ${titleCase(s.name)}`,
+          oninput: (e) => {
+            const v = Number(e.target.value);
+            if (v > 0) mine.c[s.code] = v;
+            else delete mine.c[s.code];
+            s.credits = v > 0 ? v : 0;
+            save();
+            drawSum();
+          }
+        }), "credits") : null;
+        return h("div", { class: "xi" }, h(
+          "div",
+          { class: "calc-sub" },
+          h("div", { class: "title" }, titleCase(s.name)),
+          h("div", { class: "meta hint" }, s.own ? [s.code, " \xB7 ", credit] : `${s.code} \xB7 ${fmt3(s.credits)} credits`),
+          h("div", { class: "gchips" }, chips)
+        ));
+      });
+      render(
+        el,
+        head,
+        h("div", { class: "xg" }, h("div", { class: "xi" }, sum2), rows2),
+        audits.length ? h("div", { class: "note" }, `${audits.map((a) => titleCase(a.name)).join(", ")} ${audits.length === 1 ? "is an audit subject" : "are audit subjects"}, ${audits.length === 1 ? "it doesn't" : "they don't"} count.`) : null
+      );
+    }
+    return { el, update };
+  }
+
+  // src/screens/academics/overview.js
+  var WHATIF = "jp:whatif";
+  var loadWhatif = () => {
+    try {
+      const v = JSON.parse(localStorage.getItem(WHATIF) || "{}") || {};
+      return Object.fromEntries(Object.entries(v).filter(([k, x]) => Number(k) > 0 && typeof x === "number"));
+    } catch {
+      return {};
+    }
+  };
+  function overview2(ctx) {
+    const root = h("div");
+    const draw = scheduler2(() => full());
+    const d = academicsData(draw);
+    let projections = loadWhatif();
+    const save = () => {
+      try {
+        localStorage.setItem(WHATIF, JSON.stringify(projections));
+      } catch {
+      }
+    };
+    const chart = gpaChart({ onProject: (s, v) => {
+      projections = { ...projections, [s]: v };
+      save();
+      live();
+    } });
+    const headEl = h("div");
+    const foot = h("div", { class: "chart-foot" });
+    const chartCard = h("div", { class: "chart-card" }, chart.el, foot);
+    const calc = sgpaCalc(d);
+    function live() {
+      const real = d.list;
+      const cr = d.credits.data;
+      const latest = real.at(-1);
+      const required = Number(cr?.totalreqcredit) || 0;
+      const course = required > 0 ? Math.round(required / 20) : 8;
+      const maxSem = Math.min(12, Math.max(course, (latest?.semester || 0) + 1, 2));
+      const nextCredits = Number(cr?.registeredCredits) > 0 ? Number(cr.registeredCredits) : latest?.courseCredits || 20;
+      const future = [];
+      for (let s = (latest?.semester || 0) + 1; s <= maxSem; s++) future.push(s);
+      const proj = Object.fromEntries(Object.entries(projections).filter(([k]) => future.includes(Number(k))));
+      const points = gpaPoints(real, proj, nextCredits, maxSem);
+      const projected = points.at(-1)?.projected ? points.at(-1) : null;
+      const earned = cr ? Number(cr.earnedcredit) : null;
+      render(
+        headEl,
+        h(
+          "div",
+          { class: "hd-row" },
+          big("CGPA", latest ? f2(latest.cgpa) : "\u2013", "var(--cgpa)"),
+          big("SGPA", latest ? f2(latest.sgpa) : "\u2013", "var(--sgpa)"),
+          projected ? big("Projected", f2(projected.cgpa), "var(--tertiary)") : null
+        ),
+        earned != null && required > 0 ? [
+          h(
+            "div",
+            { class: "credits" },
+            h("span", { class: "number", style: { color: "var(--cgpa)" } }, String(earned)),
+            h("span", { class: "t" }, ` / ${required} credits`)
+          ),
+          h(
+            "div",
+            { class: "bar", role: "progressbar", "aria-valuenow": earned, "aria-valuemax": required },
+            h("div", { class: "fill", style: { width: `calc(${Math.min(1, earned / required) * 100}% - 2px)` } }),
+            earned < required ? h("div", { class: "track" }) : null
+          )
+        ] : null
+      );
+      chart.update(points, future);
+      const any = Object.keys(proj).length > 0;
+      render(
+        foot,
+        h("div", { class: "body-sm muted" }, any ? "Dashed lines are what-ifs, not results" : "Tap a future semester, then drag to see where your CGPA lands"),
+        any ? h("button", { class: "btn text", style: { height: "36px" }, onclick: () => {
+          projections = {};
+          save();
+          live();
+        } }, "Reset") : null
+      );
+    }
+    function semesterRows() {
+      const graded = d.semesters.filter((s) => s.result);
+      if (!graded.length) return null;
+      return [
+        section("Semesters"),
+        xgroup(graded.map((s) => {
+          const r = s.result;
+          return {
+            tap: s.code ? () => ctx.nav.push("gradecard", { code: s.code }) : null,
+            el: h(
+              "div",
+              { class: "row-sem" },
+              h(
+                "div",
+                { class: "grow" },
+                h("div", { class: "title" }, s.number ? `Semester ${s.number}` : semLabel(s.code)),
+                h("div", { class: "body-sm muted" }, [s.code ? semLabel(s.code) : null, `${fmt3(r.earnedCredits)} credits`].filter(Boolean).join(" \xB7 "))
+              ),
+              figure(f1(r.sgpa), "SGPA", "var(--sgpa)"),
+              h("div", { style: { width: "16px" } }),
+              figure(f2(r.cgpa), "CGPA", "var(--cgpa)"),
+              h("span", { class: "chev" }, s.code ? icon("chevron_right", 24) : h("span", { style: { width: "24px" } }))
+            )
+          };
+        }))
+      ];
+    }
+    function full() {
+      calc.update();
+      if (d.noMember) {
+        return render(root, emptyState("Can't load your results", NO_MEMBER), calc.el);
+      }
+      const res = d.results;
+      if (!res.data) {
+        if (!res.error) return render(root, skeletons(3, 120));
+        return render(root, errorState(res.error, () => {
+          d.reload();
+          draw();
+        }));
+      }
+      const real = d.list;
+      if (!real.length) {
+        return render(root, res.error ? staleBanner(res.error) : null, emptyState("No results yet, first semester?"), calc.el);
+      }
+      live();
+      render(
+        root,
+        res.error ? staleBanner(res.error) : null,
+        headEl,
+        chartCard,
+        semesterRows(),
+        calc.el,
+        h("div", { style: { height: "16px" } })
+      );
+    }
+    full();
+    return root;
+  }
+
+  // src/domain/exams.js
+  var pad2 = (n) => String(n).padStart(2, "0");
+  var dayKey = (d) => `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  var dayDate = (key2) => {
+    const [y, m, d] = key2.split("-").map(Number);
+    return new Date(y, m - 1, d);
+  };
+  var addDays = (key2, n) => {
+    const d = dayDate(key2);
+    d.setDate(d.getDate() + n);
+    return dayKey(d);
+  };
+  var daysBetween = (a, b) => Math.round((dayDate(b) - dayDate(a)) / 864e5);
+  var CLOCK = /(\d{1,2})[:.](\d{2})(?::\d{2})?(?:\s*:?\s*([ap])\.?m\b\.?)?/gi;
+  function parseClocks(s) {
+    const out = [];
+    for (const m of String(s || "").matchAll(CLOCK)) {
+      const h2 = Number(m[1]), min = Number(m[2]);
+      const ap = (m[3] || "").toLowerCase();
+      const hour = ap === "" ? h2 : ap === "a" ? h2 === 12 ? 0 : h2 : h2 === 12 ? 12 : h2 + 12;
+      const twelve = ap === "" || h2 >= 1 && h2 <= 12;
+      if (twelve && hour >= 0 && hour <= 23 && min >= 0 && min <= 59) out.push(hour * 60 + min);
+    }
+    return out;
+  }
+  function slot(r) {
+    const date = String(r.datetime || "").trim();
+    const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(date);
+    const day = m ? `${m[3]}-${pad2(m[2])}-${pad2(m[1])}` : null;
+    const from = String(r.datetimefrom || ""), until = String(r.datetimeupto || "");
+    const start2 = parseClocks(from)[0] ?? parseClocks(until)[0] ?? null;
+    const last = parseClocks(until).at(-1);
+    const end = last != null && (start2 == null || last > start2) ? last : null;
+    const room = String(r.roomcode || "").trim(), seat2 = String(r.seatno || "").trim();
+    const subject2 = String(r.subjectdesc || "");
+    return {
+      date,
+      day,
+      from,
+      until,
+      start: start2,
+      end,
+      room,
+      seat: seat2,
+      code: String(r.subjectcode || "").trim(),
+      subjectName: subject2.split("(")[0].trim(),
+      seated: !!(room || seat2)
+    };
+  }
+  function event(r) {
+    return {
+      id: r.exameventid,
+      code: String(r.exameventcode || ""),
+      description: String(r.exameventdesc || ""),
+      from: r.eventfrom != null ? Number(r.eventfrom) : null,
+      registrationid: r.registrationid,
+      raw: r
+    };
+  }
+  function short(ev) {
+    const c = (ev.code || ev.description).toUpperCase();
+    const t = /\b(?:TEST|T)[-\s]?(\d+)/.exec(c);
+    if (t) return `T${t[1]}`;
+    if (c.includes("END")) return "End sem";
+    if (c.includes("MID")) return "Mid sem";
+    return ev.code || ev.description;
+  }
+  var outOf = (ev) => {
+    const m = /(\d+)\s*-?\s*MARKS/.exec(ev.code.toUpperCase());
+    return m ? Number(m[1]) : null;
+  };
+  var at = (day, mins) => {
+    const d = dayDate(day);
+    d.setMinutes(mins);
+    return d.getTime();
+  };
+  function paper(ev, s) {
+    const start2 = s.day && s.start != null ? at(s.day, s.start) : null;
+    const end = s.day && s.end != null ? at(s.day, s.end) : null;
+    return {
+      event: ev,
+      slot: s,
+      key: `${ev.id}|${s.code}|${s.date}`,
+      day: s.day,
+      start: start2,
+      end,
+      duration: start2 != null && end != null ? (end - start2) / 6e4 : null,
+      // when it's surely over. no end time, three hours covers the longest sitting
+      over: end ?? (start2 != null ? start2 + 3 * 36e5 : s.day ? at(addDays(s.day, 1), 0) : null)
+    };
+  }
+  function status(p, now3) {
+    if (p.over == null) return "upcoming";
+    if (now3 >= p.over) return "done";
+    if (p.start != null && now3 >= p.start) return "live";
+    return "upcoming";
+  }
+  var sortKey = (p) => p.start ?? (p.day ? at(p.day, 0) : Infinity);
+  function overlaps(a, b) {
+    if (a.start == null || b.start == null) return false;
+    if (a.end != null && b.end != null) return a.start < b.end && b.start < a.end;
+    return a.start === b.start;
+  }
+  function plan(papers, now3) {
+    const done = papers.filter((p) => status(p, now3) === "done");
+    const upcoming = papers.filter((p) => status(p, now3) !== "done").sort((a, b) => sortKey(a) - sortKey(b));
+    const next = upcoming[0] || null;
+    const groups = /* @__PURE__ */ new Map();
+    for (const p of upcoming) {
+      const k = p.day ?? "";
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(p);
+    }
+    let prev = null;
+    const days = [...groups].map(([date, list]) => {
+      const d = date || null;
+      const free = prev && d ? Math.max(0, daysBetween(prev, d) - 1) : 0;
+      if (d) prev = d;
+      return { date: d, papers: list, free };
+    });
+    const clashes = {};
+    const byDay = /* @__PURE__ */ new Map();
+    for (const p of papers) if (p.day) {
+      if (!byDay.has(p.day)) byDay.set(p.day, []);
+      byDay.get(p.day).push(p);
+    }
+    for (const list of byDay.values()) for (const a of list) for (const b of list) if (a !== b && overlaps(a, b) && !clashes[a.key]) clashes[a.key] = b;
+    const running = new Set(upcoming.map((p) => p.event.id));
+    const run = [...new Set(papers.filter((p) => running.has(p.event.id) && p.day).map((p) => p.day))].sort();
+    return {
+      now: now3,
+      today: dayKey(new Date(now3)),
+      next,
+      days,
+      done: done.sort((a, b) => sortKey(b) - sortKey(a)),
+      clashes,
+      run,
+      status: (p) => status(p, now3)
+    };
+  }
+  function minutes2(m) {
+    if (m < 60) return `${m}m`;
+    if (m % 60 === 0) return `${m / 60}h`;
+    return `${Math.floor(m / 60)}h ${m % 60}m`;
+  }
+  function spokenLength(m) {
+    if (m < 60) return `${m} minutes`;
+    if (m === 60) return "1 hour";
+    if (m % 60 === 0) return `${m / 60} hours`;
+    return `${minutes2(m)} long`;
+  }
+  var clock = (mins) => `${(Math.floor(mins / 60) + 11) % 12 + 1}:${pad2(mins % 60)}`;
+  var meridiem = (mins) => mins < 720 ? "AM" : "PM";
+  var time = (mins) => `${clock(mins)} ${meridiem(mins)}`;
+  function window2(p) {
+    const s = p.slot;
+    if (s.start == null) return (s.until || s.from).trim() || null;
+    if (s.end == null) return time(s.start);
+    const start2 = s.start < 720 === s.end < 720 ? clock(s.start) : time(s.start);
+    return `${start2} \u2013 ${time(s.end)}`;
+  }
+  function relative(day, today) {
+    const d = daysBetween(today, day);
+    if (d === -1) return "Yesterday";
+    if (d < 0) return `${-d} days ago`;
+    if (d === 0) return "Today";
+    if (d === 1) return "Tomorrow";
+    return `in ${d} days`;
+  }
+  var WD = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
+  var MO = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+  var longDay = (key2) => {
+    const d = dayDate(key2);
+    return `${WD[d.getDay()]}, ${d.getDate()} ${MO[d.getMonth()]}`;
+  };
+  var shortDay = (key2) => {
+    const d = dayDate(key2);
+    return `${WD[d.getDay()].slice(0, 3)} ${d.getDate()} ${MO[d.getMonth()].slice(0, 3)}`;
+  };
+  var narrowWeekday = (key2) => WD[dayDate(key2).getDay()][0];
+  var monthShort = (key2) => MO[dayDate(key2).getMonth()].slice(0, 3).toUpperCase();
+  function ics(p, title, where) {
+    const begin = p.start ?? (p.day ? at(p.day, 0) : null);
+    if (begin == null) return null;
+    const z = (ms) => new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
+    const allDay = p.start == null;
+    const d8 = (key2) => key2.replace(/-/g, "");
+    const escp = (s) => String(s).replace(/[\\;,]/g, (c) => "\\" + c).replace(/\n/g, "\\n");
+    const eve = at(addDays(p.day, -1), 20 * 60);
+    const lines = [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "PRODID:-//JPortal//iOS//EN",
+      "BEGIN:VEVENT",
+      `UID:${p.key.replace(/[^\w|-]/g, "")}@jportal`,
+      `DTSTAMP:${z(Date.now())}`,
+      allDay ? `DTSTART;VALUE=DATE:${d8(p.day)}` : `DTSTART:${z(begin)}`,
+      allDay ? `DTEND;VALUE=DATE:${d8(addDays(p.day, 1))}` : `DTEND:${z(p.over ?? begin + 3 * 36e5)}`,
+      `SUMMARY:${escp(title)}`,
+      where ? `LOCATION:${escp(where)}` : null,
+      `DESCRIPTION:${escp(p.slot.code + (where ? "" : ". Room and seat come out about a day before."))}`,
+      "BEGIN:VALARM",
+      "ACTION:DISPLAY",
+      `DESCRIPTION:${escp(title)}`,
+      `TRIGGER:-PT${Math.round((begin - eve) / 6e4)}M`,
+      "END:VALARM",
+      allDay ? null : ["BEGIN:VALARM", "ACTION:DISPLAY", `DESCRIPTION:${escp(title)}`, "TRIGGER:-PT60M", "END:VALARM"],
+      "END:VEVENT",
+      "END:VCALENDAR"
+    ].flat().filter(Boolean);
+    return lines.join("\r\n");
+  }
+
+  // src/screens/academics/exams.js
+  var PICK = "jp:acad:examsem";
+  function exams(ctx) {
+    const root = h("div");
+    const draw = scheduler2(() => full());
+    let showDone = false;
+    let picked2 = null;
+    try {
+      picked2 = sessionStorage.getItem(PICK);
+    } catch {
+    }
+    const sems = resource("acad:exsems", () => api.examSemesters(), draw);
+    const events = /* @__PURE__ */ new Map();
+    const sheets = /* @__PURE__ */ new Map();
+    let scrolled = null;
+    const subject2 = (p) => titleCase(p.slot.subjectName);
+    function current() {
+      const list = semList(sems.data, "semesterCodeinfo", "semestercode");
+      const sem = list.find((s) => s.registrationcode === picked2) || list[0] || null;
+      return { list, sem };
+    }
+    function full() {
+      if (!root.isConnected && root.__drawn) return;
+      root.__drawn = true;
+      const { list, sem } = current();
+      if (!sem) {
+        if (!sems.data && !sems.error) return render(root, skeletons(3, 90));
+        if (!sems.data) return render(root, errorState(sems.error, sems.reload));
+        return render(root, emptyState("No exams on the calendar", "Enjoy it while it lasts."));
+      }
+      if (!events.has(sem.registrationcode)) events.set(sem.registrationcode, resource("acad:exev:" + sem.registrationcode, () => api.examEvents(sem), draw));
+      const ev = events.get(sem.registrationcode);
+      const evList = (ev.data?.eventcode?.examevent || []).filter((e) => e?.exameventid).map(event);
+      const pick = h(
+        "div",
+        { class: "sem-row" },
+        semChip({ sems: list, value: sem.registrationcode, filled: true, onChange: (s) => {
+          picked2 = s.registrationcode;
+          try {
+            sessionStorage.setItem(PICK, picked2);
+          } catch {
+          }
+          scrolled = null;
+          full();
+        } }),
+        ev.at ? updated(ev.at) : null
+      );
+      if (!ev.data) {
+        if (!ev.error) return render(root, pick, skeletons(3, 90));
+        return render(root, pick, errorState(ev.error, ev.reload));
+      }
+      const t = now();
+      const today = dayKey(new Date(t));
+      const rs = evList.map((e) => {
+        if (!sheets.has(e.id)) sheets.set(e.id, resource("acad:exsch:" + e.id, () => api.examSchedule(e.raw), draw));
+        return [e, sheets.get(e.id)];
+      });
+      const papers = rs.flatMap(([e, r]) => (r.data?.subjectinfo || []).map((row) => paper(e, slot(row))));
+      const loadingPapers = rs.some(([, r]) => !r.data && !r.error);
+      const pending = rs.filter(([e, r]) => r.data && !(r.data.subjectinfo || []).length && e.from != null && dayKey(new Date(e.from)) >= today).map(([e]) => e);
+      const plan2 = plan(papers, t);
+      const stale = ev.error || rs.find(([, r]) => r.error && r.data)?.[1].error;
+      const out = [pick, stale ? staleBanner(stale) : null];
+      if (!papers.length) {
+        const first = pending.slice().sort((a, b) => a.from - b.from)[0];
+        if (loadingPapers) out.push(skeletons(3, 90));
+        else if (first) out.push(emptyState("Date sheet's not out yet", `${short(first)} starts around ${shortDay(dayKey(new Date(first.from)))}. It shows up here once the portal has it.`));
+        else {
+          const failed = rs.find(([, r]) => r.error && !r.data);
+          out.push(failed ? errorState(failed[1].error, failed[1].reload) : emptyState("No exams on the calendar", "Enjoy it while it lasts."));
+        }
+        return render(root, out);
+      }
+      let strip = null;
+      if (!plan2.next) out.push(emptyState("That's a wrap", "Every paper on this sheet is done."));
+      else if (plan2.run.length >= 2) out.push(strip = runStrip(plan2, papers, (day) => openSheet(papers.filter((p) => p.day === day))));
+      if (plan2.days.length) {
+        out.push(section("Date sheet"));
+        for (const day of plan2.days) {
+          if (day.free > 0) out.push(h("div", { class: "gap" }, h("hr"), h("span", { class: "ic" }, icon("bed", 16), day.free === 1 ? "1 day free" : `${day.free} days free`), h("hr")));
+          out.push(h(
+            "div",
+            { class: "dayh" },
+            h("span", { class: "grow" }, day.date ? longDay(day.date) : "Date not out yet"),
+            day.date ? h("span", { class: "rel" }, relative(day.date, today)) : null
+          ));
+          out.push(h("div", { class: "xg" }, day.papers.map((p, i) => h("div", { class: "xi" }, paperRow(p, plan2, i > 0, i < day.papers.length - 1)))));
+        }
+      }
+      if (pending.length) {
+        out.push(h("div", { class: "xg", style: { marginTop: "12px" } }, pending.map((e) => h("div", { class: "xi" }, h(
+          "div",
+          { class: "pend" },
+          h("span", { class: "ic" }, icon("calendar_month", 24)),
+          h(
+            "div",
+            { class: "grow" },
+            h("div", { class: "title" }, `${short(e)} date sheet`),
+            h("div", { class: "body-sm muted" }, "Not out yet" + (e.from != null ? ` \xB7 starts around ${shortDay(dayKey(new Date(e.from)))}` : ""))
+          )
+        )))));
+      }
+      if (plan2.done.length) {
+        const n = plan2.done.length;
+        out.push(h(
+          "button",
+          { class: ["doneh", showDone && "open"], "aria-expanded": String(showDone), onclick: () => {
+            showDone = !showDone;
+            full();
+          } },
+          h("span", { class: "grow" }, `Done \xB7 ${n === 1 ? "1 paper" : `${n} papers`}`),
+          icon("expand_more", 24)
+        ));
+        if (showDone) out.push(h("div", { class: "xg", style: { marginBottom: "16px" } }, plan2.done.map((p, i) => h("div", { class: "xi" }, paperRow(p, plan2, i > 0, i < n - 1)))));
+      }
+      out.push(h("div", { style: { height: "16px" } }));
+      render(root, out);
+      if (strip) {
+        const key2 = `${sem.registrationcode}|${plan2.run.join(",")}`;
+        if (scrolled !== key2) {
+          scrolled = key2;
+          requestAnimationFrame(() => {
+            const cells2 = [...strip.children];
+            const i = Math.max(0, cells2.findIndex((c) => c.dataset.day >= today) - 1);
+            if (cells2[i]) strip.scrollLeft = cells2[i].offsetLeft - cells2[0].offsetLeft;
+          });
+        }
+      }
+      function paperRow(p, pl, up, down) {
+        const st = pl.status(p);
+        const done = st === "done";
+        const next = p.key === pl.next?.key;
+        const s = p.slot;
+        const clash = pl.clashes[p.key];
+        const meta = [done && s.start != null ? time(s.start) : null, p.duration != null ? minutes2(p.duration) : null].filter(Boolean).join(" \xB7 ");
+        let tb;
+        if (done) tb = [h("div", { class: "c" }, p.day ? String(dayDate(p.day).getDate()) : "?"), h("div", { class: "to" }, p.day ? monthShort(p.day) : "")];
+        else if (s.start != null) {
+          tb = [h("div", { class: "c" }, clock(s.start), h("small", null, " " + meridiem(s.start)))];
+          if (s.end != null) tb.push(h("div", { class: "to" }, "to " + (s.start < 720 === s.end < 720 ? clock(s.end) : time(s.end))));
+        } else if (s.from.trim()) tb = [h("div", { class: "c", style: { fontSize: "14px", whiteSpace: "normal" } }, s.from.trim())];
+        else tb = [h("div", { class: "c", style: { color: "var(--on-surface-variant)" } }, "TBA")];
+        const rail = h(
+          "div",
+          { class: "rail" },
+          up ? h("i", { class: "ln", style: { top: "0", height: "26px" } }) : null,
+          down ? h("i", { class: "ln", style: { top: "26px", bottom: "0" } }) : null,
+          next && down ? h("i", { class: "acc", style: { top: "26px", bottom: "12px" } }) : null,
+          h("i", { class: ["dot", next && "big"] })
+        );
+        return h(
+          "div",
+          { class: ["paper", next && "next", done && "done"], role: "button", "aria-label": speak(p, pl), onclick: () => openSheet([p]) },
+          h("div", { class: "tb" }, tb),
+          rail,
+          h(
+            "div",
+            { class: "txt" },
+            h("div", { class: "s" }, subject2(p)),
+            meta ? h("div", { class: "m" }, meta) : null,
+            clash && !done ? h("div", { class: "clash" }, icon("warning", 14), `Clashes with ${subject2(clash)}`) : null
+          ),
+          done ? null : seat(s)
+        );
+      }
+      function speak(p, pl) {
+        const s = p.slot;
+        return [
+          subject2(p),
+          short(p.event),
+          p.day ? longDay(p.day) : null,
+          window2(p)?.replace(" \u2013 ", " to "),
+          s.seated ? [s.room && `room ${s.room}`, s.seat && `seat ${s.seat}`].filter(Boolean).join(", ") : pl.status(p) !== "done" ? "room and seat not out yet" : null,
+          pl.clashes[p.key] ? `clashes with ${subject2(pl.clashes[p.key])}` : null,
+          p.key === pl.next?.key ? "next up" : null
+        ].filter(Boolean).join(", ");
+      }
+      function openSheet(list2) {
+        list2 = list2.slice().sort((a, b) => (a.start ?? Infinity) - (b.start ?? Infinity));
+        if (!list2.length) return;
+        let close = () => {
+        };
+        const parts = [];
+        list2.forEach((p, i) => {
+          if (i) parts.push(h("hr"));
+          parts.push(...detail(p, () => close()));
+        });
+        close = sheet(h("div", { class: "acad-sheet" }, parts));
+      }
+      function detail(p, close) {
+        const s = p.slot;
+        const st = plan2.status(p);
+        const where = [s.room, s.seat && `seat ${s.seat}`].filter(Boolean).join(", ");
+        const fact = (ic, text, sub, err) => h(
+          "div",
+          { class: ["fact", err && "err"] },
+          icon(ic, 20),
+          h("div", null, h("div", { class: "body" }, text), sub ? h("div", { class: "body-sm muted" }, sub) : null)
+        );
+        const clash = plan2.clashes[p.key];
+        const out2 = [
+          h("div", { class: "lab" }, [short(p.event), outOf(p.event) ? `out of ${outOf(p.event)}` : null, st === "done" ? "done" : null].filter(Boolean).join(" \xB7 ")),
+          h("div", { class: "headline-sm", style: { marginTop: "4px" } }, subject2(p)),
+          s.code ? h("div", { class: "body-sm muted" }, s.code) : null,
+          h(
+            "div",
+            { class: "facts" },
+            fact("calendar_month", p.day ? longDay(p.day) : "Date not out yet", p.day ? relative(p.day, plan2.today) : null),
+            fact("schedule", window2(p) || "Time not out yet", p.duration != null ? spokenLength(p.duration) : null),
+            s.seated ? [
+              fact("meeting_room", s.room ? `Room ${s.room}` : "Room not out yet"),
+              fact("event_seat", s.seat ? `Seat ${s.seat}` : "Seat not out yet")
+            ] : st !== "done" ? fact("event_seat", "Room and seat not out yet", "They usually come out a day before. Check back as the day gets close.") : null,
+            clash && st !== "done" ? fact("warning", `Clashes with ${subject2(clash)}`, window2(clash), true) : null
+          ),
+          h(
+            "div",
+            { class: "acts" },
+            st === "upcoming" && p.day ? h("button", { class: "btn", onclick: () => addToCalendar(p, where) }, icon("edit_calendar", 18), "Add to calendar") : null,
+            h("button", { class: "btn outline", onclick: () => {
+              close();
+              ctx.nav.push("subject", { semCode: sem.registrationcode, subjectCode: s.code });
+            } }, "Subject")
+          )
+        ];
+        return out2;
+      }
+      function addToCalendar(p, where) {
+        const text = ics(p, `${short(p.event)}: ${subject2(p)}`, where);
+        if (!text) return;
+        const url = URL.createObjectURL(new Blob([text], { type: "text/calendar" }));
+        const a = h("a", { href: url, download: `${p.slot.code || "exam"}.ics` });
+        document.body.append(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 3e4);
+      }
+    }
+    const tick2 = setInterval(() => {
+      if (root.isConnected) full();
+      else clearInterval(tick2);
+    }, 6e4);
+    full();
+    return root;
+  }
+  function seat(s) {
+    if (s.seated) {
+      return h(
+        "div",
+        { class: "seat" },
+        h("div", { class: "r" }, s.room || "Room ?"),
+        s.seat ? h("div", { class: "st" }, `seat ${s.seat}`) : null
+      );
+    }
+    return h("div", { class: "seat soon" }, icon("event_seat", 16), h("div", { class: "st" }, "seat soon"));
+  }
+  function runStrip(plan2, papers, onDay) {
+    const first = plan2.run[0], last = plan2.run.at(-1);
+    const from = plan2.today < first && daysBetween(plan2.today, first) <= 7 ? plan2.today : first;
+    const span = [];
+    for (let d = from; d <= last; d = addDays(d, 1)) span.push(d);
+    const running = new Set(plan2.days.flatMap((d) => d.papers.map((p) => p.event.id)));
+    const byDay = /* @__PURE__ */ new Map();
+    for (const p of papers) if (running.has(p.event.id) && p.day) {
+      if (!byDay.has(p.day)) byDay.set(p.day, []);
+      byDay.get(p.day).push(p);
+    }
+    const nextDay = plan2.next?.day;
+    return h("div", { class: "strip" }, span.map((d) => {
+      const ps = byDay.get(d) || [];
+      const exam = ps.length > 0;
+      const done = exam && ps.every((p) => plan2.status(p) === "done");
+      const next = d === nextDay;
+      const today = d === plan2.today;
+      const said = [longDay(d), today ? "today" : null, !exam ? "free day" : done ? "done" : ps.length === 1 ? "1 exam" : `${ps.length} exams`].filter(Boolean).join(", ");
+      return h(exam ? "button" : "div", {
+        class: ["dc", exam && "exam", done && "done", next && "next", today && "today", !(exam && !done) && "dim"],
+        "data-day": d,
+        "aria-label": said,
+        onclick: exam ? () => onDay(d) : null
+      }, h(
+        "div",
+        { class: "in" },
+        h("div", { class: "wd" }, narrowWeekday(d)),
+        h("div", { class: "dn" }, String(dayDate(d).getDate())),
+        h("div", { class: "dots" }, ps.slice(0, 3).map(() => h("i")))
+      ));
+    }));
+  }
+
+  // src/screens/academics.js
+  var VIEW = "jp:acad:view";
+  var VIEWS = [["overview", "Overview"], ["marks", "Marks"], ["exams", "Exams"]];
+  var BUILD = { overview: overview2, marks: marksPane, exams };
+  function academics(ctx) {
+    let view = "overview";
+    try {
+      view = sessionStorage.getItem(VIEW) || "overview";
+    } catch {
+    }
+    if (!BUILD[view]) view = "overview";
+    const panes = {};
+    const body = h("div");
+    const segWrap = h("div", { class: "seg-wrap" });
+    function show(v) {
+      view = v;
+      try {
+        sessionStorage.setItem(VIEW, v);
+      } catch {
+      }
+      segWrap.replaceChildren(segmented({ options: VIEWS, value: v, onChange: show }));
+      if (!panes[v]) {
+        let el;
+        try {
+          el = BUILD[v](ctx);
+        } catch (e) {
+          console.error("[jportal] academics", v, e);
+          el = h("div", { class: "center" }, String(e?.message || e));
+        }
+        panes[v] = h("div", { class: "fade-in" }, el);
+        body.append(panes[v]);
+      }
+      for (const [k, p] of Object.entries(panes)) p.style.display = k === v ? "" : "none";
+    }
+    const root = h("div", { class: "acad" }, style(), header({ title: "Academics" }), segWrap, body);
+    show(view);
+    return root;
+  }
+
+  // src/screens/gradecard.js
+  function gradecard(ctx) {
+    const code = ctx.params?.code || "";
+    const head = h("div");
+    const body = h("div");
+    const root = h("div", { class: "acad" }, style(), head, body);
+    const draw = scheduler2(() => full());
+    const d = academicsData(draw);
+    let card = null;
+    function full() {
+      const { code: cur, number } = d.current;
+      const n = numberOf(code, cur, number);
+      render(head, header({ title: "Grade card", subtitle: [n ? `Semester ${n}` : null, semLabel(code)].filter(Boolean).join(" \xB7 "), back: ctx.nav.back }));
+      const sem = semList(d.gcSems.data, "registrations").find((s) => s.registrationcode === code);
+      const program = d.program.data?.studentinfo;
+      if (sem && program && !card) card = resource("acad:gc:" + code, () => api.gradeCard(sem, program), draw);
+      const loading = !card ? !((d.gcSems.done || d.gcSems.error) && (d.program.done || d.program.error)) : !card.data && !card.error;
+      const entries = (card?.data?.gradecard || []).filter((e) => e && (e.subjectcode || e.subjectdesc));
+      if (!entries.length) {
+        if (loading) return render(body, spinner());
+        const err = card?.error || (!sem ? d.gcSems.error : null) || (!program ? d.program.error : null);
+        if (err && !card?.data) return render(body, errorState(err, () => {
+          card = null;
+          d.reload();
+          draw();
+        }));
+        return render(body, emptyState("Grades aren't out yet"));
+      }
+      const result2 = n ? d.list.find((r) => r.semester === n) : null;
+      const total = entries.reduce((a, e) => a + (Number(e.coursecreditpoint) || 0), 0);
+      render(
+        body,
+        card.error ? staleBanner(card.error) : null,
+        h(
+          "div",
+          { class: "hd-row", style: { marginTop: "-8px" } },
+          result2 ? [big("SGPA", f1(result2.sgpa), "var(--sgpa)"), big("CGPA", f2(result2.cgpa), "var(--cgpa)")] : null,
+          big("Credits", fmt3(result2?.earnedCredits > 0 ? result2.earnedCredits : total), "var(--cgpa)")
+        ),
+        h("div", { style: { height: "16px" } }),
+        xgroup(entries.map((e) => ({
+          tap: () => ctx.nav.push("subject", { semCode: code, subjectCode: String(e.subjectcode || "").trim() }),
+          el: h(
+            "div",
+            { class: "gc-row" },
+            h(
+              "div",
+              { class: "grow" },
+              h("div", { class: "n" }, titleCase(e.subjectdesc)),
+              h("div", { class: "cd" }, String(e.subjectcode || "").trim())
+            ),
+            gradeLetter(e.grade, 44),
+            figure(fmt3(e.coursecreditpoint), "credits", "var(--cgpa)")
+          )
+        }))),
+        h("div", { style: { height: "16px" } })
+      );
+    }
+    full();
+    return root;
+  }
+
+  // src/screens/me/kit.js
+  var KIT_CSS = `
+.jm-grp { display: flex; flex-direction: column; gap: 3px; }
+.jm-grp > * { background: var(--sc-low); border-radius: 6px; overflow: hidden; }
+.jm-grp > :first-child { border-top-left-radius: 24px; border-top-right-radius: 24px; }
+.jm-grp > :last-child { border-bottom-left-radius: 24px; border-bottom-right-radius: 24px; }
+.jm-tap { cursor: pointer; transition: background .12s; }
+.jm-tap:active { background: var(--sc-high); }
+.jm-entry { display: flex; align-items: center; gap: 16px; padding: 14px 20px; min-height: 72px; }
+.jm-ebox { width: 44px; height: 44px; border-radius: 50%; flex: none; display: grid; place-items: center; background: var(--sc-high); color: var(--on-surface-variant); }
+.jm-ebox.alert { background: var(--tertiary-container); color: var(--on-tertiary-container); }
+.jm-et { font-size: 16px; line-height: 24px; font-weight: 600; }
+.jm-es { font-size: 14px; line-height: 20px; color: var(--on-surface-variant); }
+.jm-info { display: flex; align-items: center; padding: 12px 20px; gap: 8px; }
+.jm-info.trail { padding-right: 8px; }
+.jm-ik { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); letter-spacing: .2px; }
+.jm-iv { font-size: 16px; line-height: 24px; overflow-wrap: anywhere; }
+.jm-sec { display: flex; align-items: center; gap: 8px; margin: 28px 0 12px 4px; }
+.jm-sec .section { margin: 0; flex: 1; }
+.jm-fig { display: flex; flex-direction: column; align-items: center; flex: none; min-width: 48px; }
+.jm-fig b { font-size: 22px; line-height: 28px; font-weight: 700; color: var(--cgpa); font-variation-settings: 'ROND' 100; }
+.jm-fig span { font-size: 11px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); letter-spacing: .3px; }
+.jm-grade { flex: none; display: grid; place-items: center; font-weight: 700; position: relative; font-variation-settings: 'ROND' 100; }
+.jm-grade::before { content: ''; position: absolute; inset: 0; border-radius: inherit; background: currentColor; opacity: .14; }
+.jm-av { display: grid; place-items: center; border-radius: 50%; background: var(--primary); color: var(--on-primary); flex: none; font-weight: 600; font-variation-settings: 'ROND' 100; }
+.jm-picker { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 0 8px; }
+.jm-picker .chip.filled { background: var(--secondary-container); color: var(--on-secondary-container); height: 32px; border-radius: 8px; font-size: 14px; padding: 0 8px 0 12px; }
+.jm-toast { position: absolute; left: 50%; bottom: calc(var(--safe-b) + 96px); transform: translateX(-50%); z-index: 30; background: var(--on-surface); color: var(--bg); padding: 10px 18px; border-radius: 999px; font-size: 14px; font-weight: 600; white-space: nowrap; animation: jp-fade .2s; pointer-events: none; }
+.jm-blank { height: 16px; }
+`;
+  function nameCase2(s) {
+    const t = String(s ?? "").trim().replace(/\s+/g, " ");
+    let out = "";
+    for (let i = 0; i < t.length; i++) out += i === 0 || !new RegExp("\\p{L}", "u").test(t[i - 1]) ? t[i].toUpperCase() : t[i].toLowerCase();
+    return out;
+  }
+  var fmt4 = (d) => {
+    const n = Number(d) || 0;
+    return n % 1 === 0 ? String(n) : n.toFixed(1);
+  };
+  var rupees = (v) => "\u20B9" + Math.round(Number(v) || 0).toLocaleString("en-US");
+  var blank = (v) => v == null || String(v).trim() === "";
+  var GRADE_VARS = { "A+": "--g-ap", A: "--g-a", "B+": "--g-bp", B: "--g-b", "C+": "--g-cp", C: "--g-c", D: "--g-d", F: "--g-f" };
+  var gradeColor3 = (g) => {
+    const v = GRADE_VARS[String(g || "").trim().toUpperCase()];
+    return v ? `var(${v})` : "var(--on-surface-variant)";
+  };
+  var group = (...rows2) => h("div", { class: "jm-grp" }, ...rows2);
+  function entry({ icon: ic, title, subtitle, alert = false, onClick, trailing }) {
+    return h(
+      "div",
+      { class: ["jm-entry", onClick && "jm-tap"], role: onClick ? "button" : null, onclick: onClick || null },
+      h("div", { class: ["jm-ebox", alert && "alert"] }, icon(ic, 24)),
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "jm-et" }, title),
+        subtitle ? h("div", { class: "jm-es" }, subtitle) : null
+      ),
+      trailing || null
+    );
+  }
+  var sectionH = (text, trailing) => h("div", { class: "jm-sec" }, h("div", { class: "section" }, text), trailing || null);
+  var figure2 = (value, label) => h("div", { class: "jm-fig" }, h("b", null, value), h("span", null, label));
+  function gradeLetter2(grade, size = 44) {
+    return h("div", {
+      class: "jm-grade",
+      "aria-label": `Grade ${grade || "not out"}`,
+      style: { width: size + "px", height: size + "px", borderRadius: size * 0.3 + "px", color: gradeColor3(grade), fontSize: Math.round(size * 0.42) + "px" }
+    }, h("span", { style: { position: "relative" } }, grade || "\u2013"));
+  }
+  function initials(name, size) {
+    const txt = String(name || "").split(" ").filter((w) => w.trim()).slice(0, 2).map((w) => w[0]).join("").toUpperCase();
+    return h("div", { class: "jm-av", style: { width: size + "px", height: size + "px", fontSize: Math.round(size * 0.34) + "px" } }, txt);
+  }
+  function toast(text) {
+    const app2 = globalThis.__jpApp;
+    if (!app2) return;
+    app2.querySelectorAll(".jm-toast").forEach((t2) => t2.remove());
+    const t = h("div", { class: "jm-toast", role: "status" }, text);
+    app2.append(t);
+    setTimeout(() => t.remove(), 1800);
+  }
+  async function copy(label, value) {
+    try {
+      await navigator.clipboard.writeText(String(value));
+      toast(`${label} copied`);
+    } catch {
+      toast("Couldn't copy");
+    }
+  }
+  function infoRow(label, value, { copyValue = value, trailing } = {}) {
+    if (blank(value)) return null;
+    const can = !blank(copyValue);
+    return h(
+      "div",
+      { class: ["jm-info", can && "jm-tap", trailing && "trail"], onclick: can ? () => copy(label, copyValue) : null },
+      h("div", { class: "grow" }, h("div", { class: "jm-ik" }, label), h("div", { class: "jm-iv" }, String(value))),
+      trailing || null
+    );
+  }
+  function infoGroup(pairs) {
+    const rows2 = pairs.map(([k, v]) => infoRow(k, v)).filter(Boolean);
+    return rows2.length ? group(...rows2) : null;
+  }
+  function loadPage(ctx, { title, key: key2, load: load2, draw, maxAge = 0, css = "" }) {
+    const body = h("div", null, skeletons(3, 72));
+    const root = h("div", null, h("style", null, KIT_CSS + css), header({ title, back: ctx.pushed ? ctx.nav.back : void 0 }), body);
+    const run = () => {
+      let shown = false;
+      cached(key2, load2, (data) => {
+        shown = true;
+        render(body, draw(data));
+      }, { maxAge }).catch((e) => {
+        if (shown || e.stale) body.prepend(staleBanner(e));
+        else render(body, errorState(e, () => {
+          render(body, skeletons(3, 72));
+          run();
+        }));
+      });
+    };
+    run();
+    return root;
+  }
+  function picked({ key: key2, list, of, onState }) {
+    const st = { sems: null, sem: null, data: void 0, at: 0, error: null, loading: true };
+    const emit = () => onState({ ...st });
+    const loadSem = (sem) => {
+      st.sem = sem;
+      st.data = void 0;
+      st.error = null;
+      st.loading = true;
+      emit();
+      if (!sem) {
+        st.data = null;
+        st.loading = false;
+        emit();
+        return;
+      }
+      let got = false;
+      cached(`${key2}:${sem.registrationcode}`, () => of(sem), (data, { at: at2 }) => {
+        if (st.sem !== sem) return;
+        got = true;
+        st.data = data;
+        st.at = at2;
+        st.loading = false;
+        emit();
+      }).catch((e) => {
+        if (st.sem !== sem) return;
+        st.error = e;
+        st.loading = false;
+        if (!got) st.data = void 0;
+        emit();
+      });
+    };
+    const start2 = () => {
+      st.error = null;
+      st.loading = true;
+      emit();
+      let got = false;
+      cached(`${key2}:sems`, list, (sems) => {
+        const first = !got;
+        got = true;
+        st.sems = sems;
+        if (first || !sems.some((s) => s.registrationcode === st.sem?.registrationcode)) loadSem(sems[0] || null);
+      }).catch((e) => {
+        if (got) return;
+        st.error = e;
+        st.loading = false;
+        emit();
+      });
+    };
+    start2();
+    return {
+      pick: (sem) => loadSem(sem),
+      retry: () => st.sems ? loadSem(st.sem) : start2()
+    };
+  }
+  function semesterPicker(sems, sem, onPick, at2) {
+    if (!sem || !sems?.length) return null;
+    return h(
+      "div",
+      { class: "jm-picker" },
+      semChip({ sems, value: sem.registrationcode, onChange: onPick, filled: true }),
+      at2 ? updated(at2) : null
+    );
+  }
+
+  // src/screens/me/registration.js
+  var CSS5 = `
+.jm-choice { display: flex; align-items: center; gap: 14px; padding: 12px 16px; }
+.jm-choice.off { opacity: .6; }
+.jm-rank { width: 44px; height: 44px; border-radius: 12px; flex: none; display: grid; place-items: center; font-weight: 700; font-size: 14px; background: var(--sc-high); color: var(--on-surface-variant); }
+.jm-rank.got { background: var(--primary-container); color: var(--on-primary-container); }
+.jm-cn { font-size: 16px; line-height: 22px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.jm-cc { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
+.jm-allot { font-size: 12px; font-weight: 600; color: var(--on-surface-variant); margin-right: 8px; }
+.jm-dues { display: flex; align-items: center; gap: 12px; padding: 16px; border-radius: 12px; background: var(--tertiary-container); color: var(--on-tertiary-container); font-weight: 600; font-size: 14px; margin-bottom: 8px; }
+.jm-mooc { background: var(--sc-low); border-radius: var(--r-lg); padding: 20px; }
+.jm-mooc + .jm-mooc { margin-top: 12px; }
+.jm-mt { font-size: 16px; line-height: 22px; font-weight: 600; }
+.jm-badge { display: flex; align-items: center; gap: 4px; font-size: 14px; font-weight: 600; flex: none; }
+.jm-instead { display: inline-block; margin-top: 10px; padding: 6px 10px; border-radius: 8px; background: var(--sc-high); color: var(--on-surface-variant); font-size: 12px; line-height: 16px; }
+.jm-stages { margin-top: 16px; }
+.jm-stage { display: flex; gap: 12px; }
+.jm-rail { width: 20px; flex: none; display: flex; flex-direction: column; align-items: center; padding-top: 2px; }
+.jm-dot { width: 18px; height: 18px; border-radius: 50%; flex: none; display: grid; place-items: center; }
+.jm-dot.done { background: var(--primary); color: var(--on-primary); }
+.jm-dot.wait { border: 2px solid var(--outline); }
+.jm-line { width: 2px; flex: 1; margin: 3px 0; border-radius: 1px; background: var(--outline-variant); }
+.jm-line.done { background: var(--primary); }
+.jm-st { font-size: 14px; line-height: 20px; font-weight: 600; }
+.jm-ss { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); }
+`;
+  var MON2 = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  var ordinal = (n) => n + (n % 100 >= 11 && n % 100 <= 13 ? "th" : ["th", "st", "nd", "rd"][n % 10] || "th");
+  var choiceRows = (res) => (res?.subjectpreferencegrid || []).map((c) => ({
+    code: String(c.subjectcode || "").trim(),
+    name: c.subjectdesc || "",
+    basket: c.basketcode || "",
+    basketName: c.basketdesc || "",
+    credits: Number(c.credits) || 0,
+    preference: Number(c.preference) || 0,
+    allotted: c.running === "Y",
+    audit: c.auditsubject === "Y",
+    elective: c.electivetype === "Y",
+    frozenAt: c.freezeddatetime || ""
+  }));
+  function frozenDay(s) {
+    const m = /^(\d{1,2})-(\d{1,2})-(\d{4})/.exec(String(s).trim());
+    return m ? `${Number(m[1])} ${MON2[Number(m[2]) - 1]} ${m[3]}` : null;
+  }
+  function parseStage(raw) {
+    const s = String(raw || "");
+    const at2 = s.lastIndexOf("@");
+    const text = (at2 >= 0 ? s.slice(0, at2) : s).replace(/\s+/g, " ").trim().replace(/^\d+\.\s*/, "");
+    if (!text) return null;
+    const done = at2 >= 0 && s.slice(at2 + 1).trim() === "D";
+    const m = /^(.+?)\s+(?:on|Date:-)\s+(\d{1,2})-([A-Za-z]{3})-(\d{4}) (\d{1,2}):(\d{2}) ([AP]M)(?:\s+by\s+([^(]+))?/.exec(text);
+    if (!m) return { title: text, at: null, by: null, done };
+    const when = `${Number(m[2])} ${m[3][0].toUpperCase()}${m[3].slice(1).toLowerCase()} ${m[4]}, ${Number(m[5])}:${m[6]} ${m[7]}`;
+    return { title: m[1].trim(), at: when, by: (m[8] || "").trim() || null, done };
+  }
+  function moocData(res) {
+    const req = (r) => {
+      const stages = (r.totalStages || []).map(parseStage).filter(Boolean);
+      const rep = /\(([^-()]+)-(.+)\)/.exec(r.choicetype || "");
+      return {
+        code: r.subjectcode || "",
+        name: r.subjectdesc || "",
+        stages,
+        replaces: rep ? [rep[1].trim(), rep[2].trim()] : null,
+        approved: stages.some((s) => s.done && s.title.toLowerCase() === "approved")
+      };
+    };
+    return {
+      requests: (res?.totalsubjectDetailList || []).map(req),
+      rejected: (res?.totalRejsubjectDetailList || []).map(req),
+      dues: Number(res?.duesAmount) || 0
+    };
+  }
+  var choiceSems = () => api.choiceSemesters().then((r) => r?.registrationcodelist || []);
+  var moocSems = () => api.moocSemesters().then((r) => Array.isArray(r) ? r : []);
+  function registrationRows(ctx) {
+    const choicesRow = h("div");
+    const moocRow = h("div");
+    const drawChoices = (sem, rows2) => {
+      const electives = rows2 ? new Set(rows2.filter((c) => c.elective).map((c) => c.basket)).size : 0;
+      const sub = sem ? [semLabel(sem.registrationcode), electives > 0 ? `${electives} ${electives === 1 ? "elective" : "electives"}` : null].filter(Boolean).join(" \xB7 ") : null;
+      render(choicesRow, entry({ icon: "checklist", title: "Subject choices", subtitle: sub, onClick: () => ctx.nav.push("choices") }));
+    };
+    const drawMooc = (sem, m) => {
+      let line2 = null;
+      if (m) {
+        const ok = m.requests.filter((r) => r.approved).length;
+        const wait = m.requests.length - ok;
+        line2 = [ok > 0 && `${ok} approved`, wait > 0 && `${wait} in review`, m.rejected.length > 0 && `${m.rejected.length} rejected`].filter(Boolean).join(" \xB7 ") || "No requests";
+      }
+      const sub = sem ? [semLabel(sem.registrationcode), line2].filter(Boolean).join(" \xB7 ") : null;
+      render(moocRow, entry({ icon: "cast_for_education", title: "MOOC status", subtitle: sub, onClick: () => ctx.nav.push("mooc") }));
+    };
+    drawChoices(null, null);
+    drawMooc(null, null);
+    picked({ key: "jm:choices", list: choiceSems, of: (s) => api.subjectChoices(s), onState: (s) => drawChoices(s.sem, s.data ? choiceRows(s.data) : null) });
+    picked({ key: "jm:mooc", list: moocSems, of: (s) => api.moocStatus(s), onState: (s) => drawMooc(s.sem, s.data !== void 0 ? moocData(s.data) : null) });
+    return group(choicesRow, moocRow);
+  }
+  function pickedPage(ctx, { title, key: key2, list, of, draw, isEmpty, emptyTitle, subtitleOf }) {
+    const head = h("div");
+    const body = h("div", null, skeletons(3, 72));
+    const root = h("div", null, h("style", null, KIT_CSS + CSS5), head, body);
+    const drawHead = (sub) => render(head, header({ title, subtitle: sub || void 0, back: ctx.nav.back }));
+    drawHead(null);
+    const p = picked({
+      key: key2,
+      list,
+      of,
+      onState: (s) => {
+        drawHead(s.data ? subtitleOf?.(s.data) : null);
+        const pick = semesterPicker(s.sems, s.sem, (sem) => p.pick(sem), s.data !== void 0 ? s.at : 0);
+        if (s.data === void 0) {
+          if (s.error) render(body, pick, errorState(s.error, () => p.retry()));
+          else render(body, pick, skeletons(3, 72));
+          return;
+        }
+        const stale = s.error ? staleBanner(s.error) : null;
+        if (!s.sem || isEmpty(s.data)) render(body, pick, stale, emptyState(emptyTitle));
+        else render(body, pick, stale, draw(s.data));
+      }
+    });
+    return root;
+  }
+  function choiceRow(c, ranked) {
+    const got = c.allotted;
+    return h(
+      "div",
+      { class: ["jm-choice", ranked && !got && "off"] },
+      ranked ? h("div", { class: ["jm-rank", got && "got"] }, c.preference > 0 ? ordinal(c.preference) : "\u2013") : h("span", { style: { width: "0" } }),
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "jm-cn" }, titleCase(c.name)),
+        h("div", { class: "jm-cc" }, [c.code, c.audit && "audit"].filter(Boolean).join(" \xB7 "))
+      ),
+      ranked && got ? h("span", { style: { color: "var(--primary)", display: "flex" }, "aria-label": "Allotted" }, icon("check_circle", 18)) : null,
+      figure2(fmt4(c.credits), "credits")
+    );
+  }
+  function choices(ctx) {
+    return pickedPage(ctx, {
+      title: "Subject choices",
+      key: "jm:choices",
+      list: choiceSems,
+      of: (s) => api.subjectChoices(s),
+      isEmpty: (d) => choiceRows(d).length === 0,
+      emptyTitle: "No choices this semester",
+      subtitleOf: (d) => {
+        const day = choiceRows(d).map((c) => frozenDay(c.frozenAt)).find(Boolean);
+        return day ? `Frozen on ${day}` : null;
+      },
+      draw: (d) => {
+        const baskets = /* @__PURE__ */ new Map();
+        for (const c of choiceRows(d)) {
+          if (!baskets.has(c.basket)) baskets.set(c.basket, []);
+          baskets.get(c.basket).push(c);
+        }
+        const out = [];
+        for (const [code, list] of baskets) {
+          const ranked = list.some((c) => c.elective);
+          const rows2 = ranked ? [...list].sort((a, b) => a.preference - b.preference) : list;
+          out.push(sectionH(list[0].basketName || code, ranked ? h("span", { class: "jm-allot" }, `${list.filter((c) => c.allotted).length} of ${list.length} allotted`) : null));
+          out.push(group(...rows2.map((c) => choiceRow(c, ranked))));
+        }
+        out.push(h("div", { class: "jm-blank" }));
+        return out;
+      }
+    });
+  }
+  function badge(ic, text, color) {
+    return h("div", { class: "jm-badge", style: { color } }, icon(ic, 18), text);
+  }
+  function moocCard(r, rejected) {
+    const st = r.stages;
+    return h(
+      "div",
+      { class: "jm-mooc" },
+      h(
+        "div",
+        { class: "row", style: { alignItems: "flex-start" } },
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "jm-mt" }, titleCase(r.name)),
+          h("div", { class: "body-sm muted", style: { fontWeight: 600 } }, r.code)
+        ),
+        rejected ? badge("cancel", "Rejected", "var(--error)") : r.approved ? badge("check_circle", "Approved", "var(--primary)") : badge("schedule", "In review", "var(--tertiary)")
+      ),
+      r.replaces ? h("div", { class: "jm-instead" }, `In place of ${titleCase(r.replaces[1])} \xB7 ${r.replaces[0]}`) : null,
+      st.length ? h("div", { class: "jm-stages" }, st.map((s, i) => {
+        const last = i === st.length - 1;
+        const line2 = [s.at, s.by && nameCase2(s.by)].filter(Boolean).join(" \xB7 ");
+        return h(
+          "div",
+          { class: "jm-stage" },
+          h(
+            "div",
+            { class: "jm-rail" },
+            h("div", { class: ["jm-dot", s.done ? "done" : "wait"] }, s.done ? icon("done", 12) : null),
+            last ? null : h("div", { class: ["jm-line", s.done && st[i + 1]?.done && "done"] })
+          ),
+          h(
+            "div",
+            { style: { paddingBottom: last ? "0" : "16px" } },
+            h("div", { class: "jm-st" }, s.title),
+            h("div", { class: "jm-ss" }, line2 || (s.done ? "Done" : "Waiting"))
+          )
+        );
+      })) : null
+    );
+  }
+  function mooc(ctx) {
+    return pickedPage(ctx, {
+      title: "MOOC status",
+      key: "jm:mooc",
+      list: moocSems,
+      of: (s) => api.moocStatus(s),
+      isEmpty: (d) => {
+        const m = moocData(d);
+        return !m.requests.length && !m.rejected.length;
+      },
+      emptyTitle: "No MOOC requests",
+      draw: (d) => {
+        const m = moocData(d);
+        return [
+          m.dues > 0 ? h("div", { class: "jm-dues" }, icon("payments", 18), `${rupees(m.dues)} due`) : null,
+          m.requests.map((r) => moocCard(r, false)),
+          m.rejected.map((r) => moocCard(r, true)),
+          h("div", { class: "jm-blank" })
+        ];
+      }
+    });
+  }
 
   // src/screens/subjects.js
-  var subjects = () => h("div", { class: "center" }, "TODO: subjects");
+  var CSS6 = `
+.js-search { display: flex; align-items: center; gap: 4px; height: 56px; border-radius: 28px; background: var(--sc-high); padding: 0 4px 0 16px; color: var(--on-surface-variant); }
+.js-search input { flex: 1; min-width: 0; height: 100%; border: 0; outline: 0; background: transparent; color: var(--on-surface); font-size: 16px; padding: 0 8px; }
+.js-search input::placeholder { color: var(--on-surface-variant); }
+.js-search input::-webkit-search-cancel-button { -webkit-appearance: none; }
+.js-chips { display: flex; gap: 8px; overflow-x: auto; padding: 8px 0 0; margin: 0 -16px; padding-left: 16px; padding-right: 16px; scrollbar-width: none; }
+.js-chips::-webkit-scrollbar { display: none; }
+.js-chip { flex: none; display: inline-flex; align-items: center; gap: 8px; height: 32px; padding: 0 16px; border-radius: 8px; border: 1px solid var(--outline-variant); font-size: 14px; font-weight: 600; color: var(--on-surface-variant); }
+.js-chip[aria-pressed=true] { background: var(--secondary-container); border-color: transparent; color: var(--on-secondary-container); padding-left: 8px; }
+.js-now { padding: 3px 10px; border-radius: 999px; background: var(--secondary-container); color: var(--on-secondary-container); font-size: 12px; font-weight: 600; }
+.js-row { display: flex; align-items: center; gap: 12px; padding: 14px 20px; }
+.js-name { font-size: 16px; line-height: 22px; font-weight: 600; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.js-code { font-size: 12px; line-height: 16px; font-weight: 600; color: var(--on-surface-variant); margin-top: 2px; }
+.js-t { font-size: 12px; line-height: 16px; color: var(--on-surface-variant); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+.js-hit { color: var(--primary); font-weight: 700; }
+`;
+  var COMPONENT2 = { L: "Lecture", T: "Tutorial", P: "Practical" };
+  var ORDER = ["L", "T", "P"];
+  var HALF_DAY = 12 * 3600 * 1e3;
+  var FILTERS = [["current", "This semester"], ["labs", "Labs"], ["graded", "Graded"]];
+  function term2(code) {
+    const m = /(\d{4})(ODD|EVE|EVEN)SEM/.exec(String(code || "").toUpperCase());
+    return m ? Number(m[1]) * 2 + (m[2] === "ODD" ? 1 : 0) : null;
+  }
+  function fold(semCode, rows2, grades) {
+    const by = /* @__PURE__ */ new Map();
+    for (const r of rows2) {
+      const code = String(r.subjectcode || "").trim();
+      if (!code) continue;
+      if (!by.has(code)) by.set(code, []);
+      by.get(code).push(r);
+    }
+    return [...by].map(([code, parts]) => {
+      const seen = /* @__PURE__ */ new Set();
+      const teachers = parts.map((p) => [String(p.subjectcomponentcode || "").trim(), String(p.employeename || "").trim().replace(/\s+/g, " ")]).filter(([, n]) => n).sort((a, b) => (ORDER.indexOf(a[0]) + 10) % 10 - (ORDER.indexOf(b[0]) + 10) % 10).filter(([k, n]) => {
+        const id = k + "|" + n;
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+      const g = grades.find((x) => String(x.subjectcode || "").trim() === code)?.grade;
+      return {
+        semCode,
+        code,
+        name: parts[0].subjectdesc || code,
+        credits: Math.max(...parts.map((p) => Number(p.credits) || 0)),
+        teachers,
+        audit: parts.some((p) => p.audtsubject === "Y"),
+        grade: g && String(g).trim() ? String(g).trim() : null,
+        get lab() {
+          return this.teachers.length > 0 && this.teachers.every(([k]) => k === "P");
+        }
+      };
+    });
+  }
+  function subjects(ctx) {
+    const S2 = {
+      currentCode: null,
+      currentNumber: null,
+      regs: {},
+      grades: {},
+      // code -> rows
+      pending: 0,
+      metaDone: false,
+      semsDone: false,
+      error: null,
+      stale: null,
+      noMember: !session()?.memberId
+    };
+    let query = "";
+    const filters = /* @__PURE__ */ new Set();
+    const asked = /* @__PURE__ */ new Set();
+    const track = (p) => {
+      S2.pending++;
+      schedule();
+      p.catch(() => {
+      }).finally(() => {
+        S2.pending--;
+        schedule();
+      });
+    };
+    const core = (e) => {
+      if (e?.stale) {
+        S2.stale = e;
+        schedule();
+      } else if (!S2.error) {
+        S2.error = e;
+        schedule();
+      }
+    };
+    function load2() {
+      S2.error = null;
+      S2.stale = null;
+      asked.clear();
+      track(cached("jm:subj:meta", () => api.attendanceMeta(), (d) => {
+        S2.currentCode = d?.semlist?.[0]?.registrationcode || null;
+        S2.currentNumber = Number(d?.headerlist?.[0]?.stynumber) || null;
+        S2.metaDone = true;
+        schedule();
+      }).catch((e) => {
+        S2.metaDone = true;
+        core(e);
+      }));
+      track(cached("jm:subj:sems", () => api.subjectSemesters().then((r) => r?.registrations || []), (sems) => {
+        S2.semsDone = true;
+        if (S2.noMember) {
+          schedule();
+          return;
+        }
+        sems.forEach((sem, i) => {
+          const key2 = "reg:" + sem.registrationcode;
+          if (asked.has(key2)) return;
+          asked.add(key2);
+          track(cached(`jm:subj:reg:${sem.registrationcode}`, () => api.registeredSubjects(sem), (d) => {
+            S2.regs[sem.registrationcode] = d?.registrations || [];
+            schedule();
+          }, { maxAge: i === 0 ? 0 : HALF_DAY }));
+        });
+      }).catch((e) => {
+        S2.semsDone = true;
+        core(e);
+      }));
+      const program = cached("jm:subj:program", () => api.program().then((r) => r?.studentinfo || null), () => {
+      }, { maxAge: 7 * 24 * 3600 * 1e3 });
+      program.catch(() => {
+      });
+      track(cached("jm:subj:gsems", () => api.gradeCardSemesters().then((r) => r?.registrations || []), (sems) => {
+        program.then((prog) => {
+          if (!prog) return;
+          for (const sem of sems) {
+            const key2 = "gc:" + sem.registrationcode;
+            if (asked.has(key2)) continue;
+            asked.add(key2);
+            track(cached(`jm:subj:gc:${sem.registrationcode}`, () => api.gradeCard(sem, prog), (d) => {
+              S2.grades[sem.registrationcode] = d?.gradecard || [];
+              schedule();
+            }, { maxAge: HALF_DAY }));
+          }
+        }).catch(() => {
+        });
+      }));
+    }
+    function semesters2() {
+      const anchor = term2(S2.currentCode);
+      const numberOf2 = (code) => {
+        const t = term2(code);
+        if (t == null || anchor == null || !S2.currentNumber) return null;
+        const n = S2.currentNumber - (anchor - t);
+        return n > 0 ? n : null;
+      };
+      const codes = [...new Set([S2.currentCode, ...Object.keys(S2.regs), ...Object.keys(S2.grades)].filter(Boolean))];
+      return codes.map((code) => ({
+        code,
+        number: numberOf2(code),
+        current: code === S2.currentCode,
+        subjects: fold(code, S2.regs[code] || [], S2.grades[code] || [])
+      })).sort((a, b) => b.current - a.current || (term2(b.code) || 0) - (term2(a.code) || 0));
+    }
+    const input = h("input", {
+      type: "search",
+      placeholder: "Search subjects, teachers, codes",
+      "aria-label": "Search subjects",
+      enterkeyhint: "search",
+      autocomplete: "off",
+      autocorrect: "off",
+      spellcheck: "false",
+      oninput: () => {
+        query = input.value;
+        drawClear();
+        draw();
+      },
+      onkeydown: (e) => {
+        if (e.key === "Enter") input.blur();
+      }
+    });
+    const clearSlot = h("span");
+    const drawClear = () => render(clearSlot, query ? h("button", {
+      class: "iconbtn",
+      "aria-label": "Clear",
+      onclick: () => {
+        input.value = "";
+        query = "";
+        drawClear();
+        draw();
+      }
+    }, icon("close", 24)) : null);
+    const chips = h("div", { class: "js-chips" });
+    const drawChips = () => render(chips, FILTERS.map(([k, label]) => h("button", {
+      class: "js-chip",
+      "aria-pressed": String(filters.has(k)),
+      "data-filter": k,
+      onclick: () => {
+        filters.has(k) ? filters.delete(k) : filters.add(k);
+        drawChips();
+        draw();
+      }
+    }, filters.has(k) ? icon("done", 18) : null, label)));
+    drawChips();
+    drawClear();
+    const regBox = h("div", null, sectionH("Registration"), registrationRows(ctx));
+    const list = h("div");
+    const banner = h("div");
+    const hit = (text, q) => {
+      if (!q) return text;
+      const lower = text.toLowerCase();
+      const out = [];
+      let at2 = 0, i = lower.indexOf(q);
+      while (i >= 0) {
+        if (i > at2) out.push(text.slice(at2, i));
+        out.push(h("span", { class: "js-hit" }, text.slice(i, i + q.length)));
+        at2 = i + q.length;
+        i = lower.indexOf(q, at2);
+      }
+      out.push(text.slice(at2));
+      return out;
+    };
+    const matches = (s, sub, q) => (!filters.has("current") || s.current) && (!filters.has("labs") || sub.lab) && (!filters.has("graded") || sub.grade != null) && (!q || sub.name.toLowerCase().includes(q) || sub.code.toLowerCase().includes(q) || sub.teachers.some(([, n]) => n.toLowerCase().includes(q)));
+    const subjectRow = (sub, q) => h(
+      "div",
+      {
+        class: "js-row jm-tap",
+        role: "button",
+        onclick: () => ctx.nav.push("subject", { semCode: sub.semCode, subjectCode: sub.code })
+      },
+      h(
+        "div",
+        { class: "grow" },
+        h("div", { class: "js-name" }, hit(titleCase(sub.name), q)),
+        h("div", { class: "js-code" }, hit(sub.code + (sub.audit ? " \xB7 audit" : ""), q)),
+        sub.teachers.map(([k, n]) => h("div", { class: "js-t" }, hit(`${COMPONENT2[k] || k}: ${nameCase2(n)}`, q)))
+      ),
+      // graded subjects show the grade, running ones show credits big
+      sub.grade ? gradeLetter2(sub.grade, 44) : figure2(fmt4(sub.credits), "credits")
+    );
+    let raf2 = 0;
+    function schedule() {
+      if (!raf2) raf2 = requestAnimationFrame(() => {
+        raf2 = 0;
+        draw();
+      });
+    }
+    function draw() {
+      const q = query.trim().toLowerCase();
+      const loading = S2.pending > 0 || !S2.metaDone || !S2.semsDone;
+      const groups = semesters2().map((s) => [s, s.subjects.filter((sub) => matches(s, sub, q))]).filter(([, l]) => l.length);
+      regBox.style.display = !q && !filters.size ? "" : "none";
+      render(banner, S2.stale && !S2.error ? staleBanner(S2.stale) : null);
+      let state = null;
+      if (!groups.length) {
+        if (S2.error) state = errorState(S2.error, load2);
+        else if (S2.noMember && !q && !filters.size) state = emptyState("Can't list your subjects", "Sign out and sign in again once so JPortal can pick up your student id.");
+        else if (loading) state = h("div", { style: { marginTop: "28px" } }, skeletons(4, 96));
+        else state = emptyState(q ? `Nothing matches \u201C${query.trim()}\u201D` : filters.size ? "Nothing matches these filters" : "No subjects yet");
+      }
+      render(list, state, groups.map(([s, l]) => [
+        sectionH(
+          [s.number ? `Semester ${s.number}` : null, semLabel(s.code)].filter(Boolean).join(" \xB7 "),
+          s.current ? h("span", { class: "js-now" }, "Now") : null
+        ),
+        group(...l.map((sub) => subjectRow(sub, q)))
+      ]));
+    }
+    load2();
+    draw();
+    return h(
+      "div",
+      null,
+      h("style", null, KIT_CSS + CSS6),
+      header({ title: "Subjects" }),
+      banner,
+      h("label", { class: "js-search" }, icon("search", 24), input, clearSlot),
+      chips,
+      regBox,
+      list
+    );
+  }
 
   // src/screens/me.js
-  var me = () => h("div", { class: "center" }, "TODO: me");
-  var profile = () => h("div", { class: "center" }, "TODO: profile");
-  var fees = () => h("div", { class: "center" }, "TODO: fees");
-  var bank = () => h("div", { class: "center" }, "TODO: bank");
-  var hostel = () => h("div", { class: "center" }, "TODO: hostel");
-  var choices = () => h("div", { class: "center" }, "TODO: choices");
-  var mooc = () => h("div", { class: "center" }, "TODO: mooc");
-  var settings = () => h("div", { class: "center" }, "TODO: settings");
-  var about = () => h("div", { class: "center" }, "TODO: about");
+  var CSS7 = `
+.jm-hero { display: flex; align-items: center; gap: 16px; padding: 20px; border-radius: var(--r-lg); background: var(--secondary-container); color: var(--on-secondary-container); cursor: pointer; transition: filter .12s; }
+.jm-hero:active { filter: brightness(.96); }
+.jm-hn { font-size: 22px; line-height: 28px; font-weight: 600; font-variation-settings: 'ROND' 100; }
+.jm-hl { font-size: 14px; line-height: 20px; font-weight: 600; opacity: .8; }
+.jm-energy { text-align: center; font-size: 12px; line-height: 16px; color: var(--on-surface-variant); padding: 20px 8px 0; }
+.jm-energy a { color: var(--primary); text-decoration: none; }
+.jm-phead { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 0 16px 8px; }
+.jm-hostel { border-radius: var(--r-lg); padding: 20px; background: var(--primary-container); color: var(--on-primary-container); margin-bottom: 12px; }
+.jm-chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.jm-chips span { padding: 6px 12px; border-radius: 999px; font-size: 14px; font-weight: 600; background: color-mix(in srgb, var(--surface) 55%, transparent); }
+.jm-fee { display: flex; align-items: center; gap: 12px; padding: 14px 20px; }
+.jm-choice-row { padding: 14px 20px; }
+.jm-seg { display: flex; height: 40px; border: 1px solid var(--outline); border-radius: 999px; overflow: hidden; }
+.jm-seg button { flex: 1; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 14px; font-weight: 600; border-left: 1px solid var(--outline); }
+.jm-seg button:first-child { border-left: 0; }
+.jm-seg button[aria-checked=true] { background: var(--secondary-container); color: var(--on-secondary-container); }
+.jm-switch { width: 52px; height: 32px; border-radius: 16px; flex: none; position: relative; background: var(--sc-highest); border: 2px solid var(--outline); transition: background .2s, border-color .2s; }
+.jm-switch::after { content: ''; position: absolute; top: 6px; left: 6px; width: 16px; height: 16px; border-radius: 50%; background: var(--outline); transition: all .2s; }
+.jm-switch.on { background: var(--primary); border-color: var(--primary); }
+.jm-switch.on::after { top: 2px; left: 22px; width: 24px; height: 24px; background: var(--on-primary); }
+.jm-sheet-t { font-size: 24px; line-height: 32px; font-weight: 600; text-align: center; font-variation-settings: 'ROND' 100; }
+.jm-range { width: 100%; accent-color: var(--primary); height: 32px; }
+.jm-about { display: flex; flex-direction: column; align-items: center; text-align: center; padding: 0 16px 8px; }
+.jm-mark { width: 96px; height: 96px; border-radius: 30px; display: grid; place-items: center; background: var(--primary); color: var(--on-primary); margin-bottom: 12px; }
+`;
+  var styled = (...kids) => h("div", null, h("style", null, KIT_CSS + CSS7), ...kids);
+  var general = (p) => p?.generalinformation || {};
+  function me(ctx) {
+    const s = session() || {};
+    const heroBox = h("div");
+    const moneyBox = h("div");
+    const banner = h("div");
+    let personal = null, fees2, hostelInfo;
+    const drawHero = () => {
+      const g = general(personal);
+      const name = g.studentname || s.name || "";
+      const line2 = [g.programcode, g.branch, Number(g.semester) > 0 ? `Sem ${g.semester}` : null].filter((x) => !blank(x)).join(" \xB7 ");
+      render(heroBox, h(
+        "div",
+        { class: "jm-hero", role: "button", onclick: () => ctx.nav.push("profile") },
+        initials(name, 64),
+        h(
+          "div",
+          { class: "grow" },
+          h("div", { class: "jm-hn" }, nameCase2(name)),
+          h("div", { class: "body-md" }, s.enrollmentNo || g.registrationno || ""),
+          personal && line2 ? h("div", { class: "jm-hl" }, line2) : null
+        ),
+        icon("chevron_right", 24)
+      ));
+    };
+    const drawMoney = () => {
+      const due = (fees2?.feeHeads || []).reduce((a, x) => a + (Number(x.dueamount) || 0), 0);
+      const hd = hostelInfo?.presenthosteldetail;
+      render(moneyBox, group(
+        entry({ icon: "payments", title: "Fees", subtitle: fees2 === void 0 ? null : due > 0 ? `${rupees(due)} due` : "Nothing due", alert: due > 0, onClick: () => ctx.nav.push("fees") }),
+        entry({ icon: "account_balance", title: "Bank details", onClick: () => ctx.nav.push("bank") }),
+        entry({
+          icon: "bed",
+          title: "Hostel",
+          onClick: () => ctx.nav.push("hostel"),
+          subtitle: hd ? [titleCase(hd.hosteldescription), blank(hd.allotedroomno) ? null : `Room ${hd.allotedroomno}`].filter(Boolean).join(" \xB7 ") : null
+        })
+      ));
+    };
+    drawHero();
+    drawMoney();
+    const fail = (e) => {
+      if (e?.stale && !banner.firstChild) render(banner, staleBanner(e));
+    };
+    const refresh = () => {
+      cached("jm:personal", () => api.personalInfo(), (d) => {
+        personal = d;
+        drawHero();
+      }).catch(fail);
+      cached("jm:fees", () => api.fees(), (d) => {
+        fees2 = d;
+        drawMoney();
+      }).catch(fail);
+      cached("jm:hostel", () => api.hostel(), (d) => {
+        hostelInfo = d;
+        drawMoney();
+      }).catch(fail);
+    };
+    refresh();
+    return styled(
+      header({ title: "Me" }),
+      banner,
+      heroBox,
+      sectionH("Money and stay"),
+      moneyBox,
+      sectionH("College"),
+      registrationRows(ctx),
+      sectionH("App"),
+      group(
+        entry({ icon: "settings", title: "Settings", subtitle: "Theme, goal", onClick: () => ctx.nav.push("settings") }),
+        entry({ icon: "info", title: "About JPortal", subtitle: "Credits, licenses, the official portal", onClick: () => ctx.nav.push("about") })
+      ),
+      h(
+        "div",
+        { class: "jm-energy" },
+        "Big \u{1F346} Energy lives on in ",
+        h("a", { href: "https://github.com/codeblech", target: "_blank", rel: "noopener" }, "Yash Malik")
+      )
+    );
+  }
+  function profile(ctx) {
+    return loadPage(ctx, {
+      title: "Profile",
+      css: CSS7,
+      key: "jm:personal",
+      load: () => api.personalInfo(),
+      draw: (p) => {
+        const g = general(p);
+        const join = (arr, sep) => arr.filter((x) => !blank(x)).join(sep);
+        const pct = (n) => (Number(n) || 0).toFixed(1) + "%";
+        const quals = (p?.qualification || []).map((q) => [
+          join([q.qualificationcode, q.boardname, q.yearofpassing], " \xB7 "),
+          Number(q.percentagemarks) > 0 ? pct(q.percentagemarks) : Number(q.cgpa) > 0 ? `CGPA ${q.cgpa}` : null
+        ]);
+        const qg = infoGroup(quals);
+        return [
+          h(
+            "div",
+            { class: "jm-phead" },
+            initials(g.studentname || session()?.name, 112),
+            h("div", { class: "headline-sm", style: { marginTop: "12px" } }, nameCase2(g.studentname)),
+            h("div", { class: "body muted" }, g.registrationno),
+            h("div", { class: "body-sm muted", style: { fontWeight: 600, marginTop: "8px" } }, "Tap to copy")
+          ),
+          sectionH("Academics"),
+          infoGroup([
+            ["Program", join([g.programcode, g.branch], " \xB7 ")],
+            ["Semester", Number(g.semester) > 0 ? String(g.semester) : null],
+            ["Batch", join([g.batch, g.sectioncode], " \xB7 ")],
+            ["Admitted", g.admissionyear],
+            ["APAAR ID", g.apaarid]
+          ]),
+          sectionH("Contact"),
+          infoGroup([
+            ["College email", g.studentemailid],
+            ["Personal email", g.studentpersonalemailid],
+            ["Phone", g.studentcellno],
+            ["Address", join([g.caddress1, g.caddress3, g.ccityname, g.cstatename, g.cpostalcode], ", ")]
+          ]),
+          sectionH("Family"),
+          infoGroup([
+            ["Father", nameCase2(g.fathersname)],
+            ["Mother", nameCase2(g.mothername)],
+            ["Parent phone", g.parentcellno],
+            ["Parent email", g.parentemailid]
+          ]),
+          sectionH("Personal"),
+          infoGroup([
+            ["Date of birth", g.dateofbirth],
+            ["Blood group", g.bloodgroup],
+            ["Gender", g.gender],
+            ["Category", g.category],
+            ["Nationality", g.nationality]
+          ]),
+          qg ? [sectionH("Before JIIT"), qg] : null,
+          h("div", { class: "jm-blank" })
+        ];
+      }
+    });
+  }
+  function fees(ctx) {
+    return loadPage(ctx, {
+      title: "Fees",
+      css: CSS7,
+      key: "jm:fees",
+      load: () => api.fees(),
+      draw: (f) => {
+        const heads = (f?.feeHeads || []).slice().sort((a, b) => (Number(b.stynumber) || 0) - (Number(a.stynumber) || 0));
+        if (!heads.length) return emptyState("No fee records");
+        const adv = Number(f?.advanceamount?.[0]?.amount) || 0;
+        return [
+          h("div", { style: { height: "8px" } }),
+          group(...heads.map((x) => {
+            const fee = Number(x.feeamount) || 0, paid = Number(x.receiveamount) || 0, due = Number(x.dueamount) || 0;
+            const waived = Number(x.waiveramount) || 0, refunded = Number(x.refundamount) || 0;
+            const sub = [blank(x.stytypedesc) ? null : x.stytypedesc, waived > 0 && `${rupees(waived)} waived`, refunded > 0 && `${rupees(refunded)} refunded`].filter(Boolean).join(" \xB7 ");
+            return h(
+              "div",
+              { class: "jm-fee" },
+              h(
+                "div",
+                { class: "grow" },
+                h("div", { class: "jm-et" }, `Semester ${x.stynumber}`),
+                sub ? h("div", { class: "body-sm muted" }, sub) : null
+              ),
+              h(
+                "div",
+                { style: { textAlign: "right" } },
+                h("div", { class: "title-sm tnum", style: { fontWeight: 700 } }, `${rupees(paid)} paid`),
+                h("div", { class: "body-sm muted tnum" }, `of ${rupees(fee)}`),
+                due > 0 ? h("div", { class: "body-sm tnum", style: { color: "var(--error)", fontWeight: 600 } }, `${rupees(due)} due`) : null
+              )
+            );
+          })),
+          adv > 0 ? h("div", { class: "note", style: { margin: "16px 8px 0" } }, `${rupees(adv)} held as advance`) : null
+        ];
+      }
+    });
+  }
+  var masked = (a) => a.length > 4 ? `\u2022\u2022\u2022\u2022 ${a.slice(-4)}` : a;
+  function bank(ctx) {
+    return loadPage(ctx, {
+      title: "Bank details",
+      css: CSS7,
+      key: "jm:bank",
+      load: () => api.bankInfo(),
+      draw: (r) => {
+        const b = r?.bankinfo || {};
+        const acct = String(b.bankaccountnumber || "");
+        let shown = false, timer = 0;
+        const slot2 = h("div");
+        const drawAcct = () => {
+          const row = infoRow("Account number", shown ? acct : masked(acct), {
+            copyValue: acct,
+            trailing: h("button", {
+              class: "iconbtn",
+              "aria-label": shown ? "Hide" : "Show",
+              onclick: (e) => {
+                e.stopPropagation();
+                shown = !shown;
+                clearTimeout(timer);
+                if (shown) timer = setTimeout(() => {
+                  shown = false;
+                  if (slot2.isConnected) drawAcct();
+                }, 3e4);
+                drawAcct();
+              }
+            }, icon(shown ? "visibility_off" : "visibility", 24))
+          });
+          slot2.replaceChildren(row || "");
+        };
+        drawAcct();
+        const rest = [
+          ["IFSC", b.ifsccode],
+          ["Bank", titleCase(b.bankname)],
+          ["Account holder", nameCase2(b.accountholdername)],
+          ["Branch", [b.bankaddress, b.bankcity, b.bankstate, b.bankcitypin].filter((x) => !blank(x)).join(", ")],
+          ["Status", b.freezed === "Y" ? "Locked by the accounts office" : "Editable on the portal"]
+        ].map(([k, v]) => infoRow(k, v)).filter(Boolean);
+        return [
+          h("div", { style: { height: "8px" } }),
+          group(...acct ? [slot2] : [], ...rest),
+          h("div", { class: "body-sm muted", style: { padding: "20px 20px 0" } }, "Tap to copy")
+        ];
+      }
+    });
+  }
+  function hostel(ctx) {
+    return loadPage(ctx, {
+      title: "Hostel",
+      css: CSS7,
+      key: "jm:hostel",
+      load: () => api.hostel(),
+      draw: (r) => {
+        const x = r?.presenthosteldetail;
+        if (!x) return emptyState("No hostel allotted", "Day scholar, or the allotment isn't in yet.");
+        const chips = [
+          blank(x.floor) ? null : `Floor ${x.floor}`,
+          blank(x.beddesc) ? null : x.beddesc,
+          blank(x.roomtype) ? null : titleCase(x.roomtype),
+          blank(x.hosteltypedesc) ? null : titleCase(x.hosteltypedesc)
+        ].filter(Boolean);
+        return [
+          h("div", { style: { height: "8px" } }),
+          h(
+            "div",
+            { class: "jm-hostel" },
+            h("div", { class: "title-lg" }, titleCase(x.hosteldescription)),
+            h("div", { class: "label", style: { marginTop: "8px" } }, "Room"),
+            h("div", { class: "number" }, blank(x.allotedroomno) ? "\u2013" : x.allotedroomno),
+            chips.length ? h("div", { class: "jm-chips" }, chips.map((c) => h("span", null, c))) : null
+          ),
+          infoGroup([
+            ["Allotted", [x.allotedfromdate, x.allotedtilldate].filter((v) => !blank(v)).join(" to ")],
+            ["Left on", x.hostellefton]
+          ])
+        ];
+      }
+    });
+  }
+  function confirmSignOut() {
+    const close = sheet(
+      h("div", { class: "jm-sheet-t", style: { textAlign: "left" } }, "Sign out?"),
+      h("div", { class: "body-md muted", style: { margin: "8px 0 24px" } }, "Your cached attendance and marks go too."),
+      h(
+        "div",
+        { class: "row", style: { justifyContent: "flex-end", gap: "8px" } },
+        h("button", { class: "btn text", onclick: () => close() }, "Cancel"),
+        h("button", { class: "btn", "data-signout": "", onclick: () => {
+          close();
+          signOut();
+        } }, "Sign out")
+      )
+    );
+  }
+  function targetSheet() {
+    let value = Number(prefs.get("target")) || 75;
+    const ringBox = h("div");
+    const drawRing = () => render(ringBox, ring(
+      { percent: value, target: 75, size: 120, stroke: 12, animate: false },
+      h("div", { class: "number", style: { fontSize: "33px", lineHeight: "36px" } }, `${value}%`)
+    ));
+    drawRing();
+    const done = () => {
+      prefs.set("target", value);
+      close();
+    };
+    const close = sheet(
+      h(
+        "div",
+        { style: { display: "flex", flexDirection: "column", alignItems: "center", gap: "16px" } },
+        h("div", { class: "jm-sheet-t" }, "Attendance goal"),
+        h("div", { class: "body-md muted" }, "Subjects under this get flagged."),
+        ringBox,
+        h("input", {
+          class: "jm-range",
+          type: "range",
+          min: 50,
+          max: 100,
+          step: 1,
+          value,
+          "aria-label": "Attendance goal",
+          oninput: (e) => {
+            value = Number(e.target.value);
+            drawRing();
+          }
+        }),
+        h(
+          "div",
+          { style: { alignSelf: "stretch", display: "flex", justifyContent: "flex-end" } },
+          h("button", { class: "btn", onclick: done }, "Done")
+        )
+      )
+    );
+  }
+  function settings(ctx) {
+    const body = h("div");
+    const mq = matchMedia("(prefers-color-scheme: dark)");
+    const draw = () => {
+      const mode = prefs.get("theme");
+      const dark = mode === "dark" || mode === "system" && mq.matches;
+      const amoled = !!prefs.get("amoled");
+      const opts = [["system", "System"], ["light", "Light"], ["dark", "Dark"]];
+      render(
+        body,
+        sectionH("Look"),
+        group(
+          h(
+            "div",
+            { class: "jm-choice-row" },
+            h("div", { class: "jm-et", style: { marginBottom: "10px" } }, "Theme"),
+            h("div", { class: "jm-seg", role: "radiogroup", "aria-label": "Theme" }, opts.map(([k, label]) => h(
+              "button",
+              { role: "radio", "aria-checked": String(k === mode), "data-theme-opt": k, onclick: () => {
+                if (k !== mode) prefs.set("theme", k);
+              } },
+              k === mode ? icon("done", 18) : null,
+              label
+            )))
+          ),
+          // pure black only means something once it's dark
+          dark ? h(
+            "div",
+            {
+              class: "jm-entry jm-tap",
+              role: "switch",
+              "aria-checked": String(amoled),
+              "data-amoled": "",
+              onclick: () => prefs.set("amoled", !amoled)
+            },
+            h("div", { class: "grow" }, h("div", { class: "jm-et" }, "Pure black"), h("div", { class: "jm-es" }, "Fully black backgrounds")),
+            h("div", { class: ["jm-switch", amoled && "on"] })
+          ) : null
+        ),
+        sectionH("Attendance"),
+        group(entry({ icon: "flag", title: "Attendance goal", subtitle: `${prefs.get("target")}%`, onClick: targetSheet })),
+        sectionH("Account"),
+        group(entry({ icon: "logout", title: "Sign out", subtitle: "Clears the session and everything cached on this phone", onClick: confirmSignOut })),
+        h("div", { class: "jm-blank" })
+      );
+    };
+    draw();
+    const off = prefs.onChange(() => {
+      if (!body.isConnected && off) {
+        off();
+        return;
+      }
+      draw();
+    });
+    const onMq = () => {
+      if (!body.isConnected) mq.removeEventListener?.("change", onMq);
+      else draw();
+    };
+    mq.addEventListener?.("change", onMq);
+    return styled(header({ title: "Settings", back: ctx.nav.back }), body);
+  }
+  var open = (url) => {
+    try {
+      window.open(url, "_blank", "noopener");
+    } catch {
+    }
+  };
+  function about(ctx) {
+    return styled(
+      header({ title: "About", back: ctx.nav.back }),
+      h(
+        "div",
+        { class: "jm-about" },
+        h("div", { class: "jm-mark" }, icon("school_filled", 56)),
+        h("div", { class: "title-lg" }, "JPortal for iOS (unofficial)"),
+        h(
+          "div",
+          { class: "body-md muted", style: { marginTop: "6px", maxWidth: "320px" } },
+          "A faster face for the JIIT webportal: attendance, exams, marks, grades and the rest, on the portal itself in Safari."
+        ),
+        h("div", { class: "body-sm muted", style: { marginTop: "12px" } }, "Unofficial. Not affiliated with or endorsed by JIIT.")
+      ),
+      sectionH("Portal"),
+      group(
+        entry({ icon: "open_in_new", title: "Open the official portal", subtitle: "The webportal as JIIT made it", onClick: () => globalThis.__jpOpenPortal?.() }),
+        entry({ icon: "logout", title: "Sign out", subtitle: "Clears the session and everything cached on this phone", onClick: confirmSignOut })
+      ),
+      sectionH("Made possible by"),
+      group(
+        entry({ icon: "favorite", title: "JPortal for Android", subtitle: "By codelif. The design and code this is ported from", onClick: () => open("https://github.com/codelif/jportal-android") }),
+        entry({ icon: "code", title: "ktjiit", subtitle: "By codelif. How the portal is spoken to", onClick: () => open("https://github.com/codelif/ktjiit") }),
+        entry({ icon: "favorite", title: "JPortal", subtitle: "By Yash Malik (codeblech). The original design and spirit", onClick: () => open("https://github.com/codeblech/jportal") }),
+        entry({ icon: "code", title: "jsjiit", subtitle: "ISC, portal protocol groundwork", onClick: () => open("https://github.com/codeblech/jsjiit") }),
+        entry({ icon: "code", title: "pyjiit", subtitle: "MIT, where it all started", onClick: () => open("https://github.com/codelif/pyjiit") })
+      ),
+      sectionH("Licenses"),
+      group(
+        infoRow("JPortal for iOS, JPortal for Android, ktjiit", "GNU General Public License v3.0", { copyValue: null }),
+        infoRow("Google Sans Flex", "SIL Open Font License 1.1", { copyValue: null }),
+        infoRow("Material Symbols", "Apache License 2.0", { copyValue: null })
+      ),
+      h("div", { class: "jm-blank" })
+    );
+  }
 
   // src/screens/index.js
   var TABS = ["attendance", "academics", "subjects", "me"];
@@ -388,7 +5387,7 @@ input, select { font: inherit; color: inherit; }
 .chip select { position: absolute; inset: 0; opacity: 0; width: 100%; height: 100%; -webkit-appearance: none; appearance: none; cursor: pointer; font-size: 16px; }
 
 /* segmented buttons, as on the academics tab */
-.seg { display: flex; border: 1px solid var(--outline); border-radius: 999px; overflow: hidden; height: 48px; }
+.seg { display: flex; border: 1px solid var(--outline); border-radius: 999px; overflow: hidden; height: 40px; }
 .seg button { flex: 1; font-weight: 600; font-size: 15px; border-left: 1px solid var(--outline); }
 .seg button:first-child { border-left: 0; }
 .seg button[aria-selected=true] { background: var(--secondary-container); color: var(--on-secondary-container); }
@@ -402,12 +5401,14 @@ input, select { font: inherit; color: inherit; }
 .iconbtn:active { background: var(--sc-high); }
 
 /* list rows inside a group card */
-.group { background: var(--sc-low); border-radius: var(--r-lg); overflow: hidden; }
+.group { display: flex; flex-direction: column; gap: 2px; }
+.group > * { background: var(--sc-low); border-radius: 4px; }
+.group > :first-child { border-top-left-radius: var(--r-md); border-top-right-radius: var(--r-md); }
+.group > :last-child { border-bottom-left-radius: var(--r-md); border-bottom-right-radius: var(--r-md); }
 .group > .item { display: flex; align-items: center; gap: 16px; padding: 14px 16px; min-height: 56px; }
-.group > .item + .item { border-top: 1px solid var(--outline-variant); }
 .group > .item.tap:active { background: var(--sc-high); }
 .kv { display: flex; justify-content: space-between; gap: 16px; padding: 12px 16px; }
-.kv + .kv { border-top: 1px solid var(--outline-variant); }
+.group > .kv { border-radius: 4px; }
 .kv .k { color: var(--on-surface-variant); }
 .kv .v { text-align: right; font-weight: 600; }
 
@@ -519,8 +5520,8 @@ input, select { font: inherit; color: inherit; }
         }
       },
       back() {
-        const top = stack.pop();
-        if (top) top.remove();
+        const top2 = stack.pop();
+        if (top2) top2.remove();
         if (!stack.length) navBar.style.display = "";
       }
     };
@@ -545,13 +5546,13 @@ input, select { font: inherit; color: inherit; }
     }
     nav.tab(TABS.includes(start2) ? start2 : "attendance");
     if (push) nav.push(push.name, push.params);
-    const api = { nav, host, unmount: () => {
+    const api2 = { nav, host, unmount: () => {
       host.remove();
       document.documentElement.style.overflow = "";
     } };
-    host.__jp = api;
+    host.__jp = api2;
     document.documentElement.style.overflow = "hidden";
-    return api;
+    return api2;
   }
 
   // src/assets/sans_flex.ttf
