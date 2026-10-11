@@ -8,7 +8,8 @@ const header = `// ==UserScript==
 // @namespace    jportal-ios.unofficial
 // @version      ${pkg.version}
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
-// @match        https://webportal.jiit.ac.in:6011/*
+// @match        https://webportal.jiit.ac.in/*
+// @include      https://webportal.jiit.ac.in:6011/*
 // @run-at       document-start
 // @inject-into  page
 // @grant        none
