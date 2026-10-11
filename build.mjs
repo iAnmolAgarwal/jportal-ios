@@ -4,8 +4,8 @@ import fs from 'node:fs';
 
 const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
 const header = `// ==UserScript==
-// @name         JPortal
-// @namespace    in.codelif.jportal.ios
+// @name         JPortal for iOS (unofficial)
+// @namespace    jportal-ios.unofficial
 // @version      ${pkg.version}
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
 // @match        https://webportal.jiit.ac.in:6011/*

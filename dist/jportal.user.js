@@ -1,6 +1,6 @@
 // ==UserScript==
-// @name         JPortal
-// @namespace    in.codelif.jportal.ios
+// @name         JPortal for iOS (unofficial)
+// @namespace    jportal-ios.unofficial
 // @version      0.1.0
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
 // @match        https://webportal.jiit.ac.in:6011/*
