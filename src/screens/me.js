@@ -1,0 +1,10 @@
+import { h } from '../ui/dom.js';
+export const me = () => h('div', { class: 'center' }, 'TODO: me');
+export const profile = () => h('div', { class: 'center' }, 'TODO: profile');
+export const fees = () => h('div', { class: 'center' }, 'TODO: fees');
+export const bank = () => h('div', { class: 'center' }, 'TODO: bank');
+export const hostel = () => h('div', { class: 'center' }, 'TODO: hostel');
+export const choices = () => h('div', { class: 'center' }, 'TODO: choices');
+export const mooc = () => h('div', { class: 'center' }, 'TODO: mooc');
+export const settings = () => h('div', { class: 'center' }, 'TODO: settings');
+export const about = () => h('div', { class: 'center' }, 'TODO: about');
