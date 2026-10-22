@@ -1,16 +1,30 @@
 {
   "name": "jportal-ios",
-  "version": "0.1.1",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "node tools/test-crypto.mjs",
-    "build": "node build.mjs"
+  "version": "0.2.0",
+  "description": "JPortal for iOS (unofficial): a Safari userscript that brings the JPortal for Android experience to the JIIT webportal on iPhone.",
+  "keywords": [
+    "jiit",
+    "jportal",
+    "userscript",
+    "safari",
+    "ios"
+  ],
+  "homepage": "https://github.com/iAnmolAgarwal/jportal-ios#readme",
+  "bugs": {
+    "url": "https://github.com/iAnmolAgarwal/jportal-ios/issues"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iAnmolAgarwal/jportal-ios.git"
+  },
+  "license": "GPL-3.0-only",
+  "author": "Anmol Agarwal",
+  "private": true,
   "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node tools/test-crypto.mjs && node tools/test-marks.mjs"
+  },
   "devDependencies": {
     "esbuild": "^0.24.2",
     "puppeteer-core": "^23.11.1"

@@ -1,8 +1,14 @@
 // ==UserScript==
 // @name         JPortal for iOS (unofficial)
 // @namespace    jportal-ios.unofficial
-// @version      0.1.1
+// @version      0.2.0
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
+// @author       Anmol Agarwal
+// @license      GPL-3.0-only
+// @homepageURL  https://github.com/iAnmolAgarwal/jportal-ios
+// @supportURL   https://github.com/iAnmolAgarwal/jportal-ios/issues
+// @updateURL    https://raw.githubusercontent.com/iAnmolAgarwal/jportal-ios/main/dist/jportal.user.js
+// @downloadURL  https://raw.githubusercontent.com/iAnmolAgarwal/jportal-ios/main/dist/jportal.user.js
 // @match        https://webportal.jiit.ac.in/*
 // @include      https://webportal.jiit.ac.in:6011/*
 // @run-at       document-start
