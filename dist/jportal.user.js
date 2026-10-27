@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JPortal for iOS (unofficial)
 // @namespace    jportal-ios.unofficial
-// @version      0.2.0
+// @version      0.2.1
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
 // @author       Anmol Agarwal
 // @license      GPL-3.0-only
@@ -675,7 +675,7 @@
   // src/core/api.js
   var BASE = "https://webportal.jiit.ac.in:6011/StudentPortalAPI";
   var PortalError = class extends Error {
-    /** kind: expired | forbidden | unavailable | empty | portal | malformed | network */
+    /** kind: expired | forbidden | unavailable | server | empty | portal | malformed | network */
     constructor(kind, message, errors = []) {
       super(message || kind);
       this.kind = kind;
@@ -737,9 +737,11 @@
       if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
       throw new PortalError("malformed", "Unexpected answer from the portal");
     }
-    const st = root.status;
+    const st = root.status && typeof root.status === "object" ? root.status : null;
     if (st?.responseStatus === "Success" && res.status < 400) return root.response ?? null;
-    if (res.status >= 500 && !st) throw new PortalError("unavailable", "The portal is down right now");
+    if (res.status >= 500 && !st) {
+      throw new PortalError("server", root.message || root.error || `Server error ${res.status}`);
+    }
     const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === "string") : [];
     throw new PortalError("portal", errors[0] || "The portal returned an error", errors);
   }
@@ -817,7 +819,7 @@
     }
   }
   var iid = () => session().instituteId;
-  var enc = { encrypted: true };
+  var enc = {};
   var api = {
     // attendance                                               fixture
     attendanceMeta: () => (

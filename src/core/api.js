@@ -9,7 +9,7 @@ import { session, tokenDate } from './session.js';
 export const BASE = 'https://webportal.jiit.ac.in:6011/StudentPortalAPI';
 
 export class PortalError extends Error {
-  /** kind: expired | forbidden | unavailable | empty | portal | malformed | network */
+  /** kind: expired | forbidden | unavailable | server | empty | portal | malformed | network */
   constructor(kind, message, errors = []) {
     super(message || kind);
     this.kind = kind;
@@ -69,9 +69,14 @@ async function unwrap(res) {
     if (res.status >= 500) throw new PortalError('unavailable', 'The portal is down right now');
     throw new PortalError('malformed', 'Unexpected answer from the portal');
   }
-  const st = root.status;
+  // the envelope's status is an object {responseStatus, errors}; spring's error page puts a plain number here instead
+  const st = root.status && typeof root.status === 'object' ? root.status : null;
   if (st?.responseStatus === 'Success' && res.status < 400) return root.response ?? null;
-  if (res.status >= 500 && !st) throw new PortalError('unavailable', 'The portal is down right now');
+  // 5xx with spring's error page ({timestamp,status,error,message,path}) instead of an envelope:
+  // the server is up, this request blew up in it. a real message, and not retried.
+  if (res.status >= 500 && !st) {
+    throw new PortalError('server', root.message || root.error || `Server error ${res.status}`);
+  }
   const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === 'string') : [];
   throw new PortalError('portal', errors[0] || 'The portal returned an error', errors);
 }
@@ -157,7 +162,10 @@ async function orEmpty(empty, p) {
 }
 
 const iid = () => session().instituteId;
-const enc = { encrypted: true };
+// the portal dropped request-body encryption in its Oct 2026 build: every body is plain JSON now.
+// (an encrypted body now makes the server throw a 500 "JSON parse error".) kept as an opts object
+// so the per-call sites read the same; flip back here if the portal ever re-adds encryption.
+const enc = {};
 
 /**
  * every call the app makes. shapes are the portal's raw json; see
