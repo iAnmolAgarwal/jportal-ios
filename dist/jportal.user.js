@@ -740,7 +740,9 @@
     const st = root.status && typeof root.status === "object" ? root.status : null;
     if (st?.responseStatus === "Success" && res.status < 400) return root.response ?? null;
     if (res.status >= 500 && !st) {
-      throw new PortalError("server", root.message || root.error || `Server error ${res.status}`);
+      const e = new PortalError("server", "The portal couldn't handle this request");
+      e.detail = `${res.status} ${root.error || ""}: ${root.message || ""}`.trim();
+      throw e;
     }
     const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === "string") : [];
     throw new PortalError("portal", errors[0] || "The portal returned an error", errors);
