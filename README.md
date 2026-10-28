@@ -53,7 +53,7 @@ Screenshots use demo data, not a real student.
 Three short guides. Tap one to open it.
 
 <details>
-<summary><h3>1. Install it (first time, about 5 minutes)</h3></summary>
+<summary><b>1. Install it (first time, about 5 minutes)</b></summary>
 <br>
 
 You need an iPhone, Safari and your JIIT Google account. You only do this once.
@@ -135,7 +135,7 @@ JPortal takes over as soon as the portal signs you in. Still seeing the portal's
 </details>
 
 <details>
-<summary><h3>2. Open it like an app, from your Home Screen</h3></summary>
+<summary><b>2. Open it like an app, from your Home Screen</b></summary>
 <br>
 
 One minute, once. After this, JPortal is one tap away from your Home Screen.
@@ -151,12 +151,10 @@ One minute, once. After this, JPortal is one tap away from your Home Screen.
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/home-3-name-dark.png"><img src="docs/images/home-3-name-light.png" width="260" alt="The Add to Home Screen sheet: name field, Open as Web App switched off, and the Add button"></picture>
 </p>
 
-> [!IMPORTANT]
 > **Open as Web App must be off.** A web app opens outside Safari, where Userscripts can't run, so you'd just
 > get the plain portal. With it off, the icon opens the portal in Safari and JPortal runs. Don't see the
 > switch (older iOS)? Just tap **Add**.
 
-> [!TIP]
 > **Tapped the icon and got the plain portal?** Reload the page (pull down, or tap ↻ in the address bar).
 > JPortal takes over after the reload.
 
@@ -167,7 +165,7 @@ in Safari instead.
 </details>
 
 <details>
-<summary><h3>3. Something's wrong? Update and quick fixes</h3></summary>
+<summary><b>3. Something's wrong? Update and quick fixes</b></summary>
 <br>
 
 #### Seeing the plain portal instead of JPortal? Reload.
