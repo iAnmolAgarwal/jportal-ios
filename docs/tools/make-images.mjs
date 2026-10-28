@@ -348,6 +348,36 @@ const STEPS = (theme) => {
       panels: [{ html: framed(theme, 'attendance', 300) }],
       tag: 'preview, demo data',
     },
+    // home screen icon. 8284/8285 are taken over the user's real attendance: crops keep only the
+    // menus, and the share sheet's own app rows are cut off below Add to Home Screen.
+    'home-1-share': {
+      n: 1, title: 'Open ••• and tap Share', sub: 'On the portal in Safari, signed in.',
+      panels: [
+        { src: shot(8272), crop: [70, 2270, 1030, 180], radius: 40, rings: [{ x: 935, y: 2300, w: 130, h: 130, r: 65, pad: 8 }] },
+        { gap: 'then' },
+        { src: shot(8284), crop: [330, 1450, 760, 990], rings: [{ x: 380, y: 1492, w: 670, h: 96, r: 30, pad: 6 }] },
+      ],
+    },
+    'home-2-add': {
+      n: 2, title: 'Tap Add to Home Screen', sub: 'Scroll down the share sheet to find it.',
+      panels: [{ src: shot(8285), crop: [48, 875, 1076, 860], rings: [{ x: 60, y: 1566, w: 1052, h: 146, r: 30, pad: 4 }] }],
+    },
+    'home-3-name': {
+      n: 3, title: 'Web App off, name it, Add', sub: 'Then open JPortal from your Home Screen.',
+      panels: [{
+        src: shot(8286), crop: [0, 170, 1170, 980],
+        rings: [
+          { x: 272, y: 462, w: 864, h: 92, r: 16, pad: 6 },
+          { x: 935, y: 886, w: 186, h: 82, r: 41, pad: 8 },
+          { x: 934, y: 224, w: 186, h: 124, r: 62, pad: 6 },
+        ],
+        callouts: [
+          { x: 640, y: 590, text: 'rename it JPortal', align: 'center' },
+          { x: 1120, y: 1000, text: 'switch this off', align: 'right' },
+        ],
+      }],
+      note: 'With it off, the icon opens in Safari, where JPortal runs.',
+    },
     'help-check-script': {
       n: null, title: 'Is the script running?', sub: 'If you still see the portal\'s own menu after signing in:',
       panels: [
