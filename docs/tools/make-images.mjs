@@ -182,7 +182,7 @@ function guideCard(theme, { n, title, sub, tag, accent }) {
 }
 
 // ------------------------------------------------------------------ 2. framed app screens
-const SCREENS = ['attendance', 'subject', 'overview', 'calculator', 'marks', 'exams', 'me'];
+const SCREENS = ['attendance', 'subject', 'overview', 'calculator', 'marks', 'exams', 'subjects', 'me'];
 
 // ------------------------------------------------------------------ 3. tutorial step cards
 // a panel crops a real 1170x2532 screenshot. all coordinates are in the screenshot's own pixels.

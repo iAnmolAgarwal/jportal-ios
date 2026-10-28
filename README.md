@@ -37,6 +37,7 @@ Unofficial. Not affiliated with or endorsed by JIIT.
 <p align="center">
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screen-marks-dark.png"><img src="docs/images/screen-marks-light.png" width="160" alt="Marks"></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screen-exams-dark.png"><img src="docs/images/screen-exams-light.png" width="160" alt="Exam schedule"></picture>
+  <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screen-subjects-dark.png"><img src="docs/images/screen-subjects-light.png" width="160" alt="Subjects: every registered subject with its teachers and credits"></picture>
   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/screen-me-dark.png"><img src="docs/images/screen-me-light.png" width="160" alt="Me: profile, fees, hostel and more"></picture>
 </p>
 
@@ -57,7 +58,7 @@ Screenshots use demo data, not a real student.
 Three short guides. **Tap a card to open it.** New here? Start with 1.
 
 <details>
-<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-1-install-dark.png"><img src="docs/images/guide-1-install-light.png" width="92%" alt="1. Install it: first time on this iPhone, about 5 minutes. Tap to open."></picture></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-1-install-dark.png"><img src="docs/images/guide-1-install-light.png" width="92%" align="middle" alt="1. Install it: first time on this iPhone, about 5 minutes. Tap to open."></picture></summary>
 <br>
 
 You need an iPhone, Safari and your JIIT Google account. You only do this once.
@@ -139,7 +140,7 @@ JPortal takes over as soon as the portal signs you in. Still seeing the portal's
 </details>
 
 <details>
-<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-2-home-dark.png"><img src="docs/images/guide-2-home-light.png" width="92%" alt="2. Open it like an app: add it to your Home Screen. Tap to open."></picture></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-2-home-dark.png"><img src="docs/images/guide-2-home-light.png" width="92%" align="middle" alt="2. Open it like an app: add it to your Home Screen. Tap to open."></picture></summary>
 <br>
 
 One minute, once. After this, JPortal is one tap away from your Home Screen.
@@ -169,7 +170,7 @@ in Safari instead.
 </details>
 
 <details>
-<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-3-fix-dark.png"><img src="docs/images/guide-3-fix-light.png" width="92%" alt="3. Something's wrong? Update to the latest version, and quick fixes. Tap to open."></picture></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-3-fix-dark.png"><img src="docs/images/guide-3-fix-light.png" width="92%" align="middle" alt="3. Something's wrong? Update to the latest version, and quick fixes. Tap to open."></picture></summary>
 <br>
 
 #### Seeing the plain portal instead of JPortal? Reload.

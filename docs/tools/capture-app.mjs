@@ -25,6 +25,7 @@ const SHOTS = [
   { name: 'calculator', q: 'tab=academics&now=2026-09-24', whatif: true, calc: true },
   { name: 'marks', q: 'tab=academics&now=2026-09-24', click: ['.seg button:nth-child(2)'] },
   { name: 'exams', q: 'tab=academics&now=2026-10-08', click: ['.seg button:nth-child(3)'] },
+  { name: 'subjects', q: 'tab=subjects&now=2026-09-24' },
   { name: 'me', q: 'tab=me&now=2026-09-24' },
 ];
 
