@@ -280,14 +280,14 @@ function appStore(t, w) {
 // ---- install step: the Userscripts popup on the raw script page (illustration).
 // wording from the Userscripts source (v4.8.6 App.svelte / InstallView.svelte), colours sampled from
 // the user's real popup screenshot. not a screenshot: we haven't seen this screen on a phone yet.
-function popupInstall(t, w) {
+function popupInstall(t, w, banner = 'Userscript Detected: Tap to install') {
   const sheet = '#2F3236', line = '#45484E', sub = '#A1A4AA', blue = '#74B1EB';
   const font = "font-family:-apple-system,'SF Pro Text','JP Sans Flex',sans-serif";
   const ring = `<span style="position:absolute;inset:-8px;border-radius:16px;border:3.5px solid ${t.primary};box-shadow:0 0 0 7px ${t.halo}"></span>`;
   const head = `<div style="text-align:center;font-weight:700;font-size:17px;padding:16px 0 12px">Userscripts</div>`;
   const a = `<div style="width:${w}px;border-radius:22px;background:${sheet};color:#fff;${font};outline:1px solid ${t.outline};padding:0 0 18px">
       ${head}
-      <div style="margin:4px 18px 0;position:relative;border-radius:10px;background:${blue};color:#14212F;font-weight:650;font-size:15px;padding:11px 14px;text-align:center">Userscript Detected: Tap to install${ring}</div>
+      <div style="margin:4px 18px 0;position:relative;border-radius:10px;background:${blue};color:#14212F;font-weight:650;font-size:15px;padding:11px 14px;text-align:center">${banner}${ring}</div>
     </div>`;
   const b = `<div style="width:${w}px;border-radius:22px;background:${sheet};color:#fff;${font};outline:1px solid ${t.outline};padding:0 18px 18px">
       <div style="text-align:center;font-weight:700;font-size:17px;padding:16px 0 12px">Install Userscript</div>
@@ -306,6 +306,15 @@ function framed(theme, name, w) { return () => `<div style="display:flex;justify
 
 // the three home screen cards sit side by side in the readme, so they share one height
 const HOME_H = 476;
+// the raw script page's address bar (8289), puzzle-badged page icon ringed, then the page menu (7964)
+const installPanels = () => [
+  { src: shot(8289), crop: [96, 2290, 984, 152], radius: 76, rings: [{ x: 300, y: 2318, w: 80, h: 90, r: 24, pad: 14 }] },
+  { gap: 'then tap Userscripts' },
+  { src: shot(7964), crop: [70, 1800, 1030, 500],
+    covers: [{ x: 72, y: 2125, w: 1026, h: 165, bg: '#464646', fg: '#C7C7CC', rr: '0 0 40px 40px' }],
+    rings: [{ x: 90, y: 1980, w: 990, h: 125, r: 20, pad: 6 }] },
+  { gap: 'then' },
+];
 const STEPS = (theme) => {
   const t = T[theme];
   return {
@@ -343,15 +352,14 @@ const STEPS = (theme) => {
       note: 'This one still says <b>Ask</b>. Change it to <b>Allow</b>, or JPortal can\'t run.',
     },
     'step-5-install': {
-      n: 5, title: 'Install JPortal', sub: 'Open the install link in Safari, then the Userscripts menu.',
-      panels: [
-        { src: shot(7964), crop: [70, 1800, 1030, 500],
-          covers: [{ x: 72, y: 2125, w: 1026, h: 165, bg: '#464646', fg: '#C7C7CC', rr: '0 0 40px 40px' }],
-          rings: [{ x: 90, y: 1980, w: 990, h: 125, r: 20, pad: 6 }] },
-        { gap: 'page icon (left of the address) › Userscripts' },
-        { html: (tt, w) => popupInstall(tt, w) },
-      ],
+      n: 5, title: 'Install JPortal', sub: 'Open the install link in Safari. On the page of code, tap the page icon with the puzzle piece:',
+      panels: [...installPanels(), { html: (tt, w) => popupInstall(tt, w) }],
       tag: 'popup: illustration',
+    },
+    'step-update': {
+      n: null, title: 'Install the latest version', sub: 'Open the install link in Safari again, then tap the page icon with the puzzle piece:',
+      panels: [...installPanels(), { html: (tt, w) => popupInstall(tt, w, 'Userscript Installed: Tap to re-install') }],
+      note: 'Then go back to the portal and reload it.', tag: 'popup: illustration',
     },
     'step-file': {
       n: null, title: 'Or: save the file yourself', sub: 'Put jportal.user.js in the folder from step 2.',

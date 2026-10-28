@@ -99,11 +99,13 @@ Open this page in **Safari** (not inside the GitHub app), then tap:
   <a href="https://raw.githubusercontent.com/iAnmolAgarwal/jportal-ios/main/dist/jportal.user.js"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/install-button-dark.png"><img src="docs/images/install-button-light.png" width="320" alt="Install JPortal for iOS"></picture></a>
 </p>
 
-Safari shows a page of code. That's the script, and it's meant to look like that. Tap the **page icon** on the
-left of the address bar › **Userscripts**. The Userscripts menu says **Userscript Detected: Tap to install**.
-Tap it, then tap **Install**.
+Safari shows a page of code. That's the script, and it's meant to look like that. Then:
 
-<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/step-5-install-dark.png"><img src="docs/images/step-5-install-light.png" width="400" alt="Safari's page menu with Userscripts highlighted, then the Userscripts popup with the install banner and the Install button"></picture></p>
+1. Tap the **page icon with the puzzle piece**, on the left of the address bar.
+2. Tap **Userscripts**.
+3. The Userscripts menu says **Userscript Detected: Tap to install**. Tap it, then tap **Install**.
+
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/step-5-install-dark.png"><img src="docs/images/step-5-install-light.png" width="400" alt="Safari's address bar with the puzzle-piece page icon highlighted, the page menu with Userscripts highlighted, then the Userscripts popup with the install banner and the Install button"></picture></p>
 
 <details>
 <summary><b>Didn't work? Save the file yourself instead</b></summary>
@@ -185,9 +187,13 @@ land within a few days. Installing the latest version is all you need to do:
 
 1. Open the install link in Safari:
    <p><a href="https://raw.githubusercontent.com/iAnmolAgarwal/jportal-ios/main/dist/jportal.user.js"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/install-button-dark.png"><img src="docs/images/install-button-light.png" width="260" alt="Install the latest JPortal for iOS"></picture></a></p>
-2. Tap the **page icon** › **Userscripts**. This time it says **Userscript Installed: Tap to re-install**.
-   Tap it, then **Install**. That replaces your copy with the newest one.
-3. Go back to the portal and reload it.
+2. On the page of code, tap the **page icon with the puzzle piece** (left of the address bar), then
+   **Userscripts**.
+3. This time it says **Userscript Installed: Tap to re-install**. Tap it, then **Install**. That replaces your
+   copy with the newest one.
+4. Go back to the portal and reload it.
+
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/step-update-dark.png"><img src="docs/images/step-update-light.png" width="400" alt="Safari's address bar with the puzzle-piece page icon highlighted, the page menu with Userscripts highlighted, then the Userscripts popup with the re-install banner and the Install button"></picture></p>
 
 Your settings, your sign-in and the Home Screen icon all stay as they are. You can also update from the
 Userscripts menu on any page: tap its **updates** button, then **Check Updates**.
@@ -216,7 +222,7 @@ Go through these in order:
 2. **Is Userscripts allowed?** Settings › Apps › Safari › Extensions › Userscripts: **Allow Extension** is on,
    and **Other Websites** (or webportal.jiit.ac.in) is set to **Allow**, not **Ask**. See steps 3 and 4 of
    guide 1.
-3. **Is the script installed?** On the portal, tap the page icon › **Userscripts**. If the list says
+3. **Is the script installed?** On the portal, tap the page icon (left of the address bar) › **Userscripts**. If the list says
    **All Userscripts**, that's every script you have installed. Tap **←** to see the scripts that matched
    this page. JPortal for iOS should be there.
 4. **Is it the latest version?** Install it again (see the update steps above).
