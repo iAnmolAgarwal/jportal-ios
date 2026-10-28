@@ -220,7 +220,8 @@ function panel(p, t, width) {
   </div>`;
 }
 
-function stepCard(theme, { n, title, sub, panels, note, width = 440, tag }) {
+// height: fixed card height, for cards shown side by side; the note then sits at the bottom
+function stepCard(theme, { n, title, sub, panels, note, width = 440, tag, height }) {
   const t = T[theme];
   const inner = width - 40;
   const body = panels.map((p) => {
@@ -228,7 +229,7 @@ function stepCard(theme, { n, title, sub, panels, note, width = 440, tag }) {
     if (p.html) return p.html(t, inner);
     return panel(p, t, inner);
   }).join('');
-  return `<div style="width:${width}px;padding:22px 20px 20px;border-radius:32px;background:${t.card};color:${t.ink}">
+  return `<div style="width:${width}px;padding:22px 20px 20px;border-radius:32px;background:${t.card};color:${t.ink}${height ? `;height:${height}px;display:flex;flex-direction:column` : ''}">
     <div style="display:flex;gap:14px;align-items:flex-start;margin-bottom:16px">
       ${n != null ? `<div class="rnd" style="flex:none;width:42px;height:42px;border-radius:50%;background:${t.primary};color:${t.onPrimary};display:grid;place-items:center;font-size:22px;font-weight:700">${n}</div>` : ''}
       <div style="padding-top:${n != null ? 1 : 0}px">
@@ -237,7 +238,7 @@ function stepCard(theme, { n, title, sub, panels, note, width = 440, tag }) {
       </div>
     </div>
     ${body}
-    ${note || tag ? `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:12px;gap:12px">
+    ${note || tag ? `<div style="display:flex;justify-content:space-between;align-items:center;margin-top:${height ? 'auto;padding-top:12px' : '12px'};gap:12px">
       <div style="font-size:14px;line-height:1.35;color:${t.muted}">${note || ''}</div>
       ${tag ? `<div style="flex:none;font-size:12px;font-weight:600;color:${t.muted};border:1px solid ${t.outline};border-radius:999px;padding:3px 10px">${tag}</div>` : ''}
     </div>` : ''}
@@ -303,6 +304,8 @@ function popupInstall(t, w) {
 
 function framed(theme, name, w) { return () => `<div style="display:flex;justify-content:center">${phone(app(name, theme), theme, { w })}</div>`; }
 
+// the three home screen cards sit side by side in the readme, so they share one height
+const HOME_H = 476;
 const STEPS = (theme) => {
   const t = T[theme];
   return {
@@ -378,12 +381,14 @@ const STEPS = (theme) => {
       panels: [
         { src: shot(8272), crop: [70, 2270, 1030, 180], radius: 40, rings: [{ x: 935, y: 2300, w: 130, h: 130, r: 65, pad: 8 }] },
         { gap: 'then' },
-        { src: shot(8284), crop: [330, 1450, 760, 990], rings: [{ x: 380, y: 1492, w: 670, h: 96, r: 30, pad: 6 }] },
+        { src: shot(8284), crop: [330, 1450, 760, 420], rings: [{ x: 380, y: 1492, w: 670, h: 96, r: 30, pad: 6 }] },
       ],
+      note: 'On older iOS, Share is right in Safari\'s toolbar.', height: HOME_H,
     },
     'home-2-add': {
       n: 2, title: 'Tap Add to Home Screen', sub: 'Scroll down the share sheet to find it.',
       panels: [{ src: shot(8285), crop: [48, 875, 1076, 860], rings: [{ x: 60, y: 1566, w: 1052, h: 146, r: 30, pad: 4 }] }],
+      note: 'Not in the list? Keep scrolling down.', height: HOME_H,
     },
     'home-3-name': {
       n: 3, title: 'Web App off, name it, Add', sub: 'Then open JPortal from your Home Screen.',
@@ -399,7 +404,7 @@ const STEPS = (theme) => {
           { x: 1120, y: 1000, text: 'switch this off', align: 'right' },
         ],
       }],
-      note: 'With it off, the icon opens in Safari, where JPortal runs.',
+      note: 'With it off, the icon opens in Safari, where JPortal runs.', height: HOME_H,
     },
     'help-check-script': {
       n: null, title: 'Is the script running?', sub: 'If you still see the portal\'s own menu after signing in:',
