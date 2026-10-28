@@ -149,13 +149,36 @@ function hero(theme) {
 }
 
 // the big "install" button the readme links to the raw script
-function installButton(theme) {
+function installButton(theme, label = 'Install JPortal for iOS') {
   const t = T[theme];
   const ring = ringSvg(34, 5, 1, t.onPrimary, 'transparent');
   return `<div style="padding:6px"><div class="rnd" style="display:inline-flex;align-items:center;gap:14px;height:64px;padding:0 30px 0 18px;border-radius:999px;background:${t.primary};color:${t.onPrimary};font-size:23px;font-weight:650;letter-spacing:-.2px">
     <span style="position:relative;width:34px;height:34px">${ring}
       <svg width="16" height="16" viewBox="0 0 16 16" style="position:absolute;left:9px;top:9px"><path d="M8 2v9M4 7.5 8 11.5l4-4" fill="none" stroke="${t.onPrimary}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
-    Install JPortal for iOS</div></div>`;
+    ${label}</div></div>`;
+}
+
+// the three "get started" guides are <details>; these cards are their <summary>, so they read as
+// buttons. GitHub can't style a summary, an image is the only way to make it stand out.
+const GUIDES = {
+  'guide-1-install': { n: 1, title: 'Install it', sub: 'First time on this iPhone? About 5 minutes.', tag: 'Start here', accent: 'primary' },
+  'guide-2-home': { n: 2, title: 'Open it like an app', sub: 'Add it to your Home Screen. One minute.', tag: 'One tap', accent: 'good' },
+  'guide-3-fix': { n: 3, title: "Something's wrong?", sub: 'Update to the latest version, and quick fixes.', tag: 'Fixes', accent: 'bad' },
+};
+function guideCard(theme, { n, title, sub, tag, accent }) {
+  const t = T[theme];
+  const a = t[accent], aC = { primary: t.halo, good: t.goodC, bad: t.badC }[accent];
+  const ring = ringSvg(58, 6, 1, a, 'transparent');
+  return `<div style="padding:4px"><div style="display:flex;align-items:center;gap:18px;width:720px;height:112px;padding:0 26px 0 22px;border-radius:30px;background:${t.card};color:${t.ink};box-shadow:inset 0 0 0 2px ${a}">
+    <div style="position:relative;flex:none;width:58px;height:58px">${ring}
+      <div class="rnd" style="position:absolute;inset:0;display:grid;place-items:center;font-size:25px;font-weight:700;color:${a}">${n}</div></div>
+    <div style="flex:1;min-width:0">
+      <div class="rnd" style="font-size:27px;line-height:1.15;font-weight:650;letter-spacing:-.4px">${title}</div>
+      <div style="margin-top:4px;font-size:17px;color:${t.muted}">${sub}</div>
+    </div>
+    <span class="rnd" style="flex:none;border-radius:999px;padding:7px 15px;font-size:15px;font-weight:650;color:${a};background:${aC}">${tag}</span>
+    <svg width="22" height="22" viewBox="0 0 22 22" style="flex:none"><path d="M6 8.5l5 5 5-5" fill="none" stroke="${t.muted}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </div></div>`;
 }
 
 // ------------------------------------------------------------------ 2. framed app screens
@@ -403,6 +426,8 @@ try {
   for (const theme of ['light', 'dark']) {
     await render(`hero-${theme}`, hero(theme), { width: 1300, height: 600 });
     await render(`install-button-${theme}`, installButton(theme), { width: 600, height: 200 });
+    await render(`get-started-button-${theme}`, installButton(theme, 'Get started'), { width: 600, height: 200 });
+    for (const [name, g] of Object.entries(GUIDES)) await render(`${name}-${theme}`, guideCard(theme, g), { width: 800, height: 200 });
     for (const s of SCREENS) {
       await render(`screen-${s}-${theme}`, `<div style="padding:4px">${phone(app(s, theme), theme, { w: 390 })}</div>`, { dpr: 1.25, width: 500, height: 1000 });
     }

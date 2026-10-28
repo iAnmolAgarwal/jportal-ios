@@ -22,6 +22,10 @@ No app to sideload, no server in the middle: everything stays on your phone.
 
 Unofficial. Not affiliated with or endorsed by JIIT.
 
+<p align="center">
+  <a href="#get-started"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/get-started-button-dark.png"><img src="docs/images/get-started-button-light.png" width="220" alt="Get started: install it, add it to your Home Screen, or fix it"></picture></a>
+</p>
+
 ## What you get
 
 <p align="center">
@@ -50,10 +54,10 @@ Screenshots use demo data, not a real student.
 
 ## Get started
 
-Three short guides. Tap one to open it.
+Three short guides. **Tap a card to open it.** New here? Start with 1.
 
 <details>
-<summary><b>1. Install it (first time, about 5 minutes)</b></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-1-install-dark.png"><img src="docs/images/guide-1-install-light.png" width="92%" alt="1. Install it: first time on this iPhone, about 5 minutes. Tap to open."></picture></summary>
 <br>
 
 You need an iPhone, Safari and your JIIT Google account. You only do this once.
@@ -135,7 +139,7 @@ JPortal takes over as soon as the portal signs you in. Still seeing the portal's
 </details>
 
 <details>
-<summary><b>2. Open it like an app, from your Home Screen</b></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-2-home-dark.png"><img src="docs/images/guide-2-home-light.png" width="92%" alt="2. Open it like an app: add it to your Home Screen. Tap to open."></picture></summary>
 <br>
 
 One minute, once. After this, JPortal is one tap away from your Home Screen.
@@ -165,7 +169,7 @@ in Safari instead.
 </details>
 
 <details>
-<summary><b>3. Something's wrong? Update and quick fixes</b></summary>
+<summary><picture><source media="(prefers-color-scheme: dark)" srcset="docs/images/guide-3-fix-dark.png"><img src="docs/images/guide-3-fix-light.png" width="92%" alt="3. Something's wrong? Update to the latest version, and quick fixes. Tap to open."></picture></summary>
 <br>
 
 #### Seeing the plain portal instead of JPortal? Reload.
