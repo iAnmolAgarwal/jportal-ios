@@ -10,7 +10,7 @@
 // tabs are built once and kept alive; pushed screens are rebuilt every push.
 
 import { h, render } from './ui/dom.js';
-import { icon } from './ui/components.js';
+import { icon, openSignIn } from './ui/components.js';
 import { prefs } from './core/store.js';
 import { SCREENS, TABS } from './screens/index.js';
 import css from './ui/theme.css';
@@ -102,6 +102,11 @@ export function mountApp({ startTab = 'attendance', push } = {}) {
 
   // ios edge-swipe and the back button pop our stack
   addEventListener('popstate', () => { if (stack.length) nav.back(); });
+
+  // the session ran out and the portal wouldn't extend it: offer sign-in over the saved
+  // data, once per visit. the screens keep a Sign in button for later
+  let asked = false;
+  addEventListener('jp:signin', () => { if (!asked) { asked = true; openSignIn(); } });
 
   app.append(navBar);
   let start = startTab;

@@ -2,6 +2,14 @@
 
 All notable changes to JPortal for iOS. Versions follow [semantic versioning](https://semver.org); the userscript's `@version` is the source of truth for updates.
 
+## [0.3.0] - 2026-10-30
+
+### Fixed
+- Opening JPortal a few hours after signing in (from the Home Screen icon, say) dropped you on the portal's sign-in page every time. JPortal gave up on your saved session as soon as its 2-hour stamp ran out. It now keeps the session and, when the portal turns it down, asks the portal to extend it first, the same way the portal's own website does.
+
+### Added
+- When the session really has ended, JPortal still opens with your saved data and offers **Continue with Google** right there, instead of sending you to the portal's sign-in page. Safari doesn't allow a silent Google sign-in the way the Android app does, so it's one tap. The portal's own sign-in page is still a tap away.
+
 ## [0.2.1] - 2026-10-27
 
 ### Fixed
@@ -28,5 +36,6 @@ All notable changes to JPortal for iOS. Versions follow [semantic versioning](ht
 ### Added
 - First version: Attendance, Academics (overview, CGPA what-if, SGPA calculator, marks, exams, grade cards), Subjects and Me, ported from JPortal for Android.
 
+[0.3.0]: https://github.com/iAnmolAgarwal/jportal-ios/releases/tag/v0.3.0
 [0.2.1]: https://github.com/iAnmolAgarwal/jportal-ios/releases/tag/v0.2.1
 [0.2.0]: https://github.com/iAnmolAgarwal/jportal-ios/compare/v0.1.1...v0.2.0

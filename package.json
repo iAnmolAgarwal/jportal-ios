@@ -1,6 +1,6 @@
 {
   "name": "jportal-ios",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "JPortal for iOS (unofficial): a Safari userscript that brings the JPortal for Android experience to the JIIT webportal on iPhone.",
   "keywords": [
     "jiit",

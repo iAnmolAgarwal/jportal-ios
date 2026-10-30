@@ -70,9 +70,11 @@ export function session() {
   let cap = {};
   try { cap = JSON.parse(ls(CAPTURE) || '{}'); } catch {}
   // the portal wipes its own Token whenever its sign-in page loads; our copy keeps us
-  // signed in until the jwt actually runs out, like the android app's stored session
+  // signed in. not dropped when the jwt's exp passes: the portal answers a dead token with
+  // 401, api.js asks for an extension the way the portal does, and only then asks for a
+  // sign-in, over the saved data instead of the bare sign-in page
   const live = ls('Token');
-  const token = live || (cap.token && !jwtExpired(cap.token) ? cap.token : '');
+  const token = live || cap.token || '';
   if (!token) return null;
   // a capture from an older login is still good for the member id, it doesn't change
   return {
@@ -87,17 +89,6 @@ export function session() {
     name: ls('name') || cap.name || '',
     memberType: ls('membertype') || cap.membertype || '',
   };
-}
-
-function jwtClaims(t) {
-  try { return JSON.parse(atob(t.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))); } catch { return null; }
-}
-/** past its exp claim, by the portal's (slow) clock. a token without exp counts as live */
-function jwtExpired(t) {
-  const exp = jwtClaims(t)?.exp;
-  if (!exp) return false;
-  const skew = Number(ls('jp:skew') || 0);
-  return exp * 1000 < Date.now() + skew;
 }
 
 /** the moment of login as the portal formats it, for refreshTokenRequest */
@@ -118,6 +109,21 @@ export function claim(name) {
 }
 
 export const signedIn = () => !!session()?.token;
+
+/** a fresh login from google.js, stored the way the portal's own sign-in page stores it, plus our copy */
+export function adoptLogin(res) {
+  const tokendate = new Date().toString();
+  const keys = {
+    Today_DATE: String(Date.now()), tokendate, Token: res.token, clientid: res.clientid, userid: res.userid,
+    name: res.name, membertype: res.membertype, enrollmentno: res.enrollmentno, Username: res.Username,
+    instituteid: res.value, institutename: res.label,
+  };
+  try {
+    for (const [k, v] of Object.entries(keys)) if (v != null) localStorage.setItem(k, v);
+    sessionStorage.setItem('tokendate', tokendate);
+    localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now(), tokendate }));
+  } catch {}
+}
 
 /** what the portal's own logout does, then back to its sign-in page */
 export function signOut() {

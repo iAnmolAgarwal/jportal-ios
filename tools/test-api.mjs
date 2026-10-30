@@ -114,5 +114,66 @@ await test('401 is an expired session', async () => {
   assert(err?.kind === 'expired', `got ${err?.kind}`);
 });
 
+// staying signed in. from here on a real session from storage, not the preview's
+const { session, adoptLogin } = await import('../src/core/session.js');
+const events = [];
+globalThis.dispatchEvent = (e) => events.push(e.type);
+const jwt = (exp) => 'h.' + Buffer.from(JSON.stringify({ exp })).toString('base64url') + '.s';
+const unauthorized = { status: 401, body: JSON.stringify({ timestamp: 'x', status: 401, error: 'Unauthorized' }) };
+const refreshed = (msg) => ({ status: 200, body: JSON.stringify({ status: { responseStatus: 'Success', errors: null }, response: { msg } }) });
+async function signedInLongAgo() {
+  await new Promise((r) => setTimeout(r, 5)); // let the last test's in-flight refresh clear
+  delete globalThis.__JP_PREVIEW__;
+  store.clear();
+  events.length = 0;
+  // what the sign-in page leaves behind: no portal Token, only our capture, its jwt 5h past exp
+  store.set('jp:login', JSON.stringify({ token: jwt(Math.floor(Date.now() / 1000) - 5 * 3600), value: 'INST', Username: 'u', memberid: 'MEM', tokendate: 'Thu Oct 29 2026' }));
+}
+
+await test('a captured session outlives its jwt exp, so jportal still opens', async () => {
+  await signedInLongAgo();
+  assert(session()?.token?.startsWith('h.'), 'session dropped after exp');
+  assert(session().memberId === 'MEM', 'member id lost');
+});
+
+await test('401 asks the portal to extend the session, then retries the same call', async () => {
+  await signedInLongAgo();
+  replies = [unauthorized, refreshed('Success'), ok({ fine: 1 })];
+  const r = await post('/x', { a: 1 });
+  assert(r?.fine === 1, 'retry did not return the data');
+  assert(calls[1].url.endsWith('/token/refreshTokenRequest'), `second call was ${calls[1].url}`);
+  assert(JSON.parse(calls[1].init.body).tokendate === 'Thu Oct 29 2026', 'refresh without the login date');
+  assert(!events.length, 'asked for sign-in although the extension worked');
+});
+
+await test('GET calls get the same extension attempt', async () => {
+  await signedInLongAgo();
+  replies = [unauthorized, refreshed('Success'), ok({ fine: 2 })];
+  const { get } = await import('../src/core/api.js');
+  const r = await get('/y');
+  assert(r?.fine === 2 && calls.length === 3, `got ${JSON.stringify(r)} after ${calls.length} calls`);
+});
+
+await test('when the portal refuses to extend, the app is asked to offer sign-in', async () => {
+  await signedInLongAgo();
+  replies = [unauthorized, refreshed('Failure'), unauthorized];
+  let err;
+  try { await post('/x', {}); } catch (e) { err = e; }
+  assert(err?.kind === 'expired', `got ${err?.kind}`);
+  assert(events.includes('jp:signin'), 'no jp:signin event');
+  assert(calls.length === 2, `expected the call and one refresh, got ${calls.length}`);
+});
+
+await test('a google sign-in is stored the way the portal stores it', async () => {
+  await signedInLongAgo();
+  adoptLogin({ token: 'NEW', Username: 'u2', value: 'INST2', label: 'JIIT', clientid: 'C', memberid: 'M2', enrollmentno: 'E2', name: 'N', membertype: 'S', userid: 'U' });
+  for (const [k, v] of [['Token', 'NEW'], ['Username', 'u2'], ['instituteid', 'INST2'], ['institutename', 'JIIT'], ['enrollmentno', 'E2']]) {
+    assert(store.get(k) === v, `${k} = ${store.get(k)}`);
+  }
+  assert(store.get('tokendate'), 'no tokendate for the next refresh');
+  const s = session();
+  assert(s.token === 'NEW' && s.memberId === 'M2', `session is ${s.token}/${s.memberId}`);
+});
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

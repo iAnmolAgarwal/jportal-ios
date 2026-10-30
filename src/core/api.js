@@ -104,14 +104,30 @@ async function refreshSession() {
   return refreshing;
 }
 
-/** posts and unwraps, retrying the gateway's odd dropped request. pass retry=false for writes */
-export async function post(path, payload, opts = {}) {
+/**
+ * a 401 gets one extension attempt and a retry, like the portal. when that fails too,
+ * the app is told (a 'jp:signin' event) so it can offer google sign-in over the saved data
+ */
+async function renewing(call) {
   try {
-    return await postOnce(path, payload, opts);
+    return await call();
   } catch (e) {
-    if (e instanceof PortalError && e.kind === 'expired' && await refreshSession()) return postOnce(path, payload, opts);
+    if (!(e instanceof PortalError) || e.kind !== 'expired') throw e;
+    if (await refreshSession()) {
+      try { return await call(); } catch (e2) {
+        if (e2 instanceof PortalError && e2.kind === 'expired') signInNeeded();
+        throw e2;
+      }
+    }
+    signInNeeded();
     throw e;
   }
+}
+const signInNeeded = () => { try { globalThis.dispatchEvent?.(new Event('jp:signin')); } catch {} };
+
+/** posts and unwraps, retrying the gateway's odd dropped request. pass retry=false for writes */
+export function post(path, payload, opts = {}) {
+  return renewing(() => postOnce(path, payload, opts));
 }
 
 async function postOnce(path, payload, { encrypted = false, retry = true } = {}) {
@@ -138,12 +154,15 @@ async function postOnce(path, payload, { encrypted = false, retry = true } = {})
   }
 }
 
-export async function get(path) {
-  return unwrap(await exchange(path, 'GET'));
+export function get(path) {
+  return renewing(async () => unwrap(await exchange(path, 'GET')));
 }
 
 /** raw bytes for pdf endpoints, errors still come back as json envelopes */
-export async function bytes(path) {
+export function bytes(path) {
+  return renewing(() => bytesOnce(path));
+}
+async function bytesOnce(path) {
   const res = await exchange(path, 'GET');
   const type = res.headers.get('Content-Type') || '';
   if (type.includes('json') || res.status >= 400) {

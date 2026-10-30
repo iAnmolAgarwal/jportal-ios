@@ -238,6 +238,18 @@ Go through these in order:
 - **It opens in Chrome or another browser:** the icon uses your default browser. Make Safari the default
   (Settings › Apps › Safari › **Default Browser App**), or use a Safari Favourite instead.
 - **It opens in Safari, but it's the plain portal:** reload the page.
+- **It opens the portal's sign-in page every time:** update to the latest version (above). Since 0.3.0 JPortal
+  keeps your session, and when the portal does end it, JPortal opens anyway and asks you to sign in from there.
+
+</details>
+
+<details>
+<summary><b>JPortal asks me to sign in again</b></summary>
+<br>
+
+The portal ends sessions after a while, and JPortal can't stop that. When it happens, your saved numbers stay
+on screen and a sheet offers **Continue with Google**. Tap it, pick your JIIT account, and JPortal reloads with
+fresh data. If Google's button doesn't show up, tap **Use the portal's sign-in page instead**.
 
 </details>
 
@@ -314,7 +326,9 @@ post screenshots that show your name, enrollment number or marks.
 
 The portal keeps your session in its own page storage. The script runs on the portal's own address, so it can
 call the same API the portal does, with the same request headers, ported from
-[ktjiit](https://github.com/codelif/ktjiit). Then it draws JPortal's screens over the page, in a shadow root so
+[ktjiit](https://github.com/codelif/ktjiit). When the portal turns a session down, the script asks it to extend the session, as
+the portal's own page does, and failing that shows Google's sign-in button inside JPortal, at the portal's own
+address, so Google accepts it. Then it draws JPortal's screens over the page, in a shadow root so
 the portal's styles don't leak in. Marks come as a PDF, which a small parser (also ported from ktjiit) reads
 on the phone.
 

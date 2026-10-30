@@ -171,6 +171,8 @@ input, select { font: inherit; color: inherit; }
 .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); z-index: 20; animation: jp-fade .2s; }
 .sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--sc-low); border-radius: var(--r-lg) var(--r-lg) 0 0; padding: 12px 20px calc(var(--safe-b) + 24px); max-height: 85%; overflow-y: auto; animation: jp-up .25s cubic-bezier(.2,.8,.2,1); }
 .sheet .grip { width: 32px; height: 4px; border-radius: 2px; background: var(--outline); margin: 0 auto 16px; opacity: .6; }
+.gbtn { display: flex; justify-content: center; min-height: 44px; margin-bottom: 8px; }
+.banner-act { margin-left: auto; flex: none; font: inherit; font-weight: 600; color: inherit; text-decoration: underline; padding: 4px 0 4px 8px; }
 @keyframes jp-fade { from { opacity: 0; } }
 @keyframes jp-up { from { transform: translateY(100%); } }
 

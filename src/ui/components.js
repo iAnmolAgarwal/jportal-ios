@@ -2,6 +2,7 @@
 import { h, render, semLabel } from './dom.js';
 import { ICONS } from './icons.js';
 import { ago } from '../core/store.js';
+import { googleButton } from '../core/google.js';
 
 /** a material symbol from the android app's drawables. names: see icons.js */
 export function icon(name, size = 24, extra = {}) {
@@ -147,7 +148,8 @@ export function emptyState(title, body, action) {
 }
 
 /** drop the dead token so the portal shows its google button; jportal comes back after sign-in */
-function signInAgain() {
+/** the portal's own sign-in page, with our dead session dropped so jportal stays out of its way */
+function portalSignIn() {
   try {
     localStorage.setItem('Token', '');
     // our copy of the dead session too, or jportal would mount right back over the sign-in page
@@ -158,18 +160,59 @@ function signInAgain() {
   location.href = '/studentportal/';
 }
 
+/**
+ * sign in again without leaving jportal: google's button in a sheet, saved data stays behind
+ * it. one open at a time; after the portal accepts the login the page reloads into a fresh
+ * session, the same thing the portal's own sign-in does.
+ */
+let signInOpen = false;
+export function openSignIn() {
+  if (signInOpen) return;
+  signInOpen = true;
+  // google renders into an attached element, the spinner covers the wait for its script
+  const button = h('div');
+  const wait = spinner();
+  const slot = h('div', { class: 'gbtn' }, button, wait);
+  const status = h('div', { class: 'body-md muted', style: { minHeight: '20px', textAlign: 'center' } });
+  const close = sheet(
+    h('div', { class: 'title-lg' }, 'Sign in again'),
+    h('p', { class: 'body-md muted', style: { margin: '8px 0 20px' } },
+      'Your portal session ran out. Your saved data stays here while you sign in.'),
+    slot, status,
+    h('div', { style: { textAlign: 'center', marginTop: '8px' } },
+      h('button', { class: 'btn text', onclick: portalSignIn }, "Use the portal's sign-in page instead")));
+  // the sheet's scrim closes it too; allow opening it again after that
+  const done = () => { signInOpen = false; };
+  const panel = slot.closest('.sheet');
+  new MutationObserver((_, obs) => { if (!panel.isConnected) { obs.disconnect(); done(); } }).observe(panel.parentNode, { childList: true });
+  const host = document.getElementById('jportal-root');
+  googleButton(button, {
+    dark: host?.getAttribute('data-theme') === 'dark',
+    width: Math.min(360, (panel.clientWidth || 360) - 40),
+    onSignedIn: () => { render(status, 'Signed in, loading…'); close(); location.reload(); },
+    onError: (e) => render(status, e?.message || "Couldn't sign you in"),
+  }).then(() => wait.remove()).catch((e) => {
+    render(slot);
+    render(status, `${e?.message || "Google sign-in didn't load"}. Use the portal's sign-in page below.`);
+  });
+}
+
 export function errorState(err, retry) {
   const expired = err?.kind === 'expired';
   return emptyState(
     expired ? 'Signed out' : "Couldn't load this",
-    expired ? 'Your portal session ran out. Sign in again on the portal.' : (err?.message || String(err)),
+    expired ? 'Your portal session ran out. Sign in again to see fresh numbers.' : (err?.message || String(err)),
     expired
-      ? h('button', { class: 'btn', onclick: signInAgain }, 'Sign in')
+      ? h('button', { class: 'btn', onclick: openSignIn }, 'Sign in')
       : retry ? h('button', { class: 'btn tonal', onclick: retry }, icon('refresh', 18), 'Retry') : null);
 }
 
 /** a slim banner above cached data when the refresh failed */
 export function staleBanner(err) {
+  if (err?.kind === 'expired') {
+    return h('div', { class: 'banner' }, icon('wifi_off', 18), h('span', null, 'Showing saved data. Your session ran out.'),
+      h('button', { class: 'banner-act', onclick: openSignIn }, 'Sign in'));
+  }
   return h('div', { class: 'banner' }, icon('wifi_off', 18), h('span', null, `Showing saved data. ${err?.message || ''}`));
 }
 

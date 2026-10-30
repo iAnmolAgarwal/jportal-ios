@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JPortal for iOS (unofficial)
 // @namespace    jportal-ios.unofficial
-// @version      0.2.1
+// @version      0.3.0
 // @description  JPortal for the JIIT webportal on iPhone: attendance, skip calculator, exams, SGPA/CGPA, marks. Unofficial.
 // @author       Anmol Agarwal
 // @license      GPL-3.0-only
@@ -88,7 +88,7 @@
     } catch {
     }
     const live = ls("Token");
-    const token = live || (cap.token && !jwtExpired(cap.token) ? cap.token : "");
+    const token = live || cap.token || "";
     if (!token) return null;
     return {
       token,
@@ -103,19 +103,6 @@
       memberType: ls("membertype") || cap.membertype || ""
     };
   }
-  function jwtClaims(t) {
-    try {
-      return JSON.parse(atob(t.split(".")[1].replace(/-/g, "+").replace(/_/g, "/")));
-    } catch {
-      return null;
-    }
-  }
-  function jwtExpired(t) {
-    const exp = jwtClaims(t)?.exp;
-    if (!exp) return false;
-    const skew2 = Number(ls("jp:skew") || 0);
-    return exp * 1e3 < Date.now() + skew2;
-  }
   function tokenDate() {
     try {
       return ls("tokendate") || sessionStorage.getItem("tokendate") || JSON.parse(ls(CAPTURE) || "{}").tokendate || "";
@@ -124,6 +111,28 @@
     }
   }
   var signedIn = () => !!session()?.token;
+  function adoptLogin(res) {
+    const tokendate = (/* @__PURE__ */ new Date()).toString();
+    const keys2 = {
+      Today_DATE: String(Date.now()),
+      tokendate,
+      Token: res.token,
+      clientid: res.clientid,
+      userid: res.userid,
+      name: res.name,
+      membertype: res.membertype,
+      enrollmentno: res.enrollmentno,
+      Username: res.Username,
+      instituteid: res.value,
+      institutename: res.label
+    };
+    try {
+      for (const [k, v] of Object.entries(keys2)) if (v != null) localStorage.setItem(k, v);
+      sessionStorage.setItem("tokendate", tokendate);
+      localStorage.setItem(CAPTURE, JSON.stringify({ ...res, at: Date.now(), tokendate }));
+    } catch {
+    }
+  }
   function signOut() {
     try {
       window.__jpWipe = true;
@@ -471,6 +480,411 @@
   }
   var now = () => globalThis.__JP_PREVIEW__?.now ?? Date.now();
 
+  // src/core/crypto.js
+  var IV = new TextEncoder().encode("dcek9wb8frty1pnm");
+  var IST_MS = 330 * 60 * 1e3;
+  function dateSeq(ms) {
+    const d = new Date(ms + IST_MS);
+    const dd = String(d.getUTCDate()).padStart(2, "0");
+    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
+    const yy = String(d.getUTCFullYear() % 100).padStart(2, "0");
+    return `${dd[0]}${mm[0]}${yy[0]}${d.getUTCDay()}${dd[1]}${mm[1]}${yy[1]}`;
+  }
+  var keys = /* @__PURE__ */ new Map();
+  function key(ms) {
+    const seq = dateSeq(ms);
+    if (!keys.has(seq)) {
+      const raw = new TextEncoder().encode(`qa8y${seq}ty1pn`);
+      keys.set(seq, crypto.subtle.importKey("raw", raw, { name: "AES-CBC" }, false, ["encrypt", "decrypt"]));
+    }
+    return keys.get(seq);
+  }
+  var b64 = (bytes2) => {
+    let s = "";
+    for (const b of new Uint8Array(bytes2)) s += String.fromCharCode(b);
+    return btoa(s);
+  };
+  async function encrypt(plain, ms) {
+    const out = await crypto.subtle.encrypt({ name: "AES-CBC", iv: IV }, await key(ms), new TextEncoder().encode(plain));
+    return b64(out);
+  }
+  var ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  var noise = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => ALNUM[b % ALNUM.length]).join("");
+  var localName = (ms) => encrypt(noise(4) + dateSeq(ms) + noise(5), ms);
+
+  // src/core/api.js
+  var BASE = "https://webportal.jiit.ac.in:6011/StudentPortalAPI";
+  var PortalError = class extends Error {
+    /** kind: expired | forbidden | unavailable | server | empty | portal | malformed | network */
+    constructor(kind, message, errors = []) {
+      super(message || kind);
+      this.kind = kind;
+      this.errors = errors;
+    }
+    /** the portal's "NO ... FOUND" answers, an empty list rather than a failure */
+    get isNoData() {
+      return this.kind === "portal" && this.errors.some((e) => /\bno\b.*\bfound\b|not found|no record/i.test(e));
+    }
+  };
+  var skew = Number(localStorage.getItem("jp:skew") || 0);
+  var now2 = () => Date.now() + skew;
+  function observe(res) {
+    const d = Date.parse(res.headers.get("Date") || "");
+    if (!Number.isNaN(d)) {
+      skew = d - Date.now();
+      try {
+        localStorage.setItem("jp:skew", String(skew));
+      } catch {
+      }
+    }
+  }
+  async function exchange(path, method, body) {
+    const url = path.startsWith("https://") ? path : BASE + path;
+    const s = session();
+    let res;
+    try {
+      res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json, text/plain, */*",
+          Authorization: `Bearer ${s?.token || ""}`,
+          LocalName: await localName(now2())
+        },
+        body
+      });
+    } catch (e) {
+      throw new PortalError("network", "Can't reach the portal");
+    }
+    observe(res);
+    return res;
+  }
+  async function unwrap(res) {
+    if (res.status === 401) throw new PortalError("expired", "Session expired, sign in again");
+    if (res.status === 403) throw new PortalError("forbidden", "The portal refused that");
+    const text = await res.text();
+    if (!text.trim()) {
+      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
+      if (res.status >= 400) throw new PortalError("portal", `Portal error ${res.status}`);
+      throw new PortalError("empty", "The portal sent nothing back");
+    }
+    let root;
+    try {
+      root = JSON.parse(text);
+    } catch {
+    }
+    if (!root || typeof root !== "object") {
+      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
+      throw new PortalError("malformed", "Unexpected answer from the portal");
+    }
+    const st = root.status && typeof root.status === "object" ? root.status : null;
+    if (st?.responseStatus === "Success" && res.status < 400) return root.response ?? null;
+    if (res.status >= 500 && !st) {
+      const e = new PortalError("server", "The portal couldn't handle this request");
+      e.detail = `${res.status} ${root.error || ""}: ${root.message || ""}`.trim();
+      throw e;
+    }
+    const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === "string") : [];
+    throw new PortalError("portal", errors[0] || "The portal returned an error", errors);
+  }
+  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  var transient = (e) => ["unavailable", "empty", "network"].includes(e.kind);
+  var refreshing = null;
+  async function refreshSession() {
+    if (globalThis.__JP_PREVIEW__) return false;
+    refreshing ??= (async () => {
+      try {
+        const tokendate = tokenDate();
+        const res = await unwrap(await exchange(
+          "/token/refreshTokenRequest",
+          "POST",
+          JSON.stringify({ username: session()?.username || "", tokendate })
+        ));
+        return res?.msg === "Success";
+      } catch {
+        return false;
+      } finally {
+        setTimeout(() => {
+          refreshing = null;
+        }, 0);
+      }
+    })();
+    return refreshing;
+  }
+  async function renewing(call) {
+    try {
+      return await call();
+    } catch (e) {
+      if (!(e instanceof PortalError) || e.kind !== "expired") throw e;
+      if (await refreshSession()) {
+        try {
+          return await call();
+        } catch (e2) {
+          if (e2 instanceof PortalError && e2.kind === "expired") signInNeeded();
+          throw e2;
+        }
+      }
+      signInNeeded();
+      throw e;
+    }
+  }
+  var signInNeeded = () => {
+    try {
+      globalThis.dispatchEvent?.(new Event("jp:signin"));
+    } catch {
+    }
+  };
+  function post(path, payload, opts = {}) {
+    return renewing(() => postOnce(path, payload, opts));
+  }
+  async function postOnce(path, payload, { encrypted = false, retry = true } = {}) {
+    const delays = retry ? [500, 1500] : [];
+    for (let attempt = 0; ; attempt++) {
+      try {
+        const before = dateSeq(now2());
+        const send = async () => {
+          const json = payload == null ? void 0 : JSON.stringify(payload);
+          const body = json && encrypted ? await encrypt(json, now2()) : json;
+          return unwrap(await exchange(path, "POST", body));
+        };
+        try {
+          return await send();
+        } catch (e) {
+          if (e.kind === "empty" && dateSeq(now2()) !== before) return await send();
+          throw e;
+        }
+      } catch (e) {
+        if (!(e instanceof PortalError) || !transient(e) || attempt >= delays.length) throw e;
+        await sleep(delays[attempt]);
+      }
+    }
+  }
+  function bytes(path) {
+    return renewing(() => bytesOnce(path));
+  }
+  async function bytesOnce(path) {
+    const res = await exchange(path, "GET");
+    const type = res.headers.get("Content-Type") || "";
+    if (type.includes("json") || res.status >= 400) {
+      await unwrap(res);
+      throw new PortalError("malformed", "Expected a file, got json");
+    }
+    const buf = new Uint8Array(await res.arrayBuffer());
+    if (!buf.length) throw new PortalError("empty", "The portal sent nothing back");
+    return buf;
+  }
+  async function orEmpty(empty, p) {
+    try {
+      return await p;
+    } catch (e) {
+      if (e instanceof PortalError && e.isNoData) return empty;
+      throw e;
+    }
+  }
+  var iid = () => session().instituteId;
+  var enc = {};
+  var api = {
+    // attendance                                               fixture
+    attendanceMeta: () => (
+      // att_meta.json
+      post("/StudentClassAttendance/getstudentInforegistrationforattendence", { instituteid: iid() })
+    ),
+    attendance: (sem, stynumber) => orEmpty(
+      { studentattendancelist: [] },
+      // att_detail_2026ODDSEM.json
+      post("/StudentClassAttendance/getstudentattendancedetail", {
+        instituteid: iid(),
+        registrationcode: sem.registrationcode,
+        registrationid: sem.registrationid,
+        stynumber
+      }, enc)
+    ),
+    /** subject = a studentattendancelist row; components = its subjectcomponentid(s) to include */
+    dailyAttendance: (sem, subject2, components) => orEmpty(
+      { studentAttdsummarylist: [] },
+      // daily_*.json
+      post("/StudentClassAttendance/getstudentsubjectpersentage", {
+        instituteid: iid(),
+        subjectid: subject2.subjectid,
+        registrationid: sem.registrationid,
+        cmpidkey: components.map((c) => ({ subjectcomponentid: c })),
+        // a raw attendance row's subjectcode is "NAME(CODE)", the portal wants the bare code
+        subjectcode: subject2.individualsubjectcode || subject2.subjectcode,
+        registrationcode: sem.registrationcode
+      }, enc)
+    ),
+    // subjects
+    subjectSemesters: () => post("/reqsubfaculty/getregistrationList", { instituteid: iid() }, enc),
+    // gc_regs.json shape
+    registeredSubjects: (sem) => orEmpty(
+      { registrations: [] },
+      // faculties.json
+      post("/reqsubfaculty/getfaculties", { studentid: session().memberId, instituteid: iid(), registrationid: sem.registrationid }, enc)
+    ),
+    credits: () => post("/feedbackformcontroller/getCreadits", { enrollmentNo: session().enrollmentNo }),
+    // credits.json
+    // exams
+    examSemesters: () => orEmpty(
+      { semesterCodeinfo: { semestercode: [] } },
+      // exam_sems.json
+      post("/studentcommonsontroller/getsemestercode-withstudentexamevents", { clientid: session().clientId, instituteid: iid() }, enc)
+    ),
+    examEvents: (sem) => orEmpty(
+      { eventcode: { examevent: [] } },
+      // exam_events.json
+      post("/studentcommonsontroller/getstudentexamevents", { instituteid: iid(), registationid: sem.registrationid }, enc)
+    ),
+    /** event = an exam event row (exameventid, registrationid) */
+    examSchedule: (event2) => orEmpty(
+      { subjectinfo: [] },
+      // exam_schedule.json
+      post("/studentsttattview/getstudent-examschedule", { instituteid: iid(), exameventid: event2.exameventid, registrationid: event2.registrationid }, enc)
+    ),
+    // marks
+    marksSemesters: () => orEmpty(
+      { semestercode: [] },
+      // marks_sems.json
+      post("/studentcommonsontroller/getsemestercode-exammarks", { instituteid: iid() }, enc)
+    ),
+    marksPdf: (sem) => bytes(`/studentsexamview/printstudent-exammarks/${iid()}/${sem.registrationid}/${sem.registrationcode}`),
+    // marks/*.pdf
+    // grades
+    gradeCardSemesters: () => orEmpty(
+      { registrations: [] },
+      // gc_regs.json
+      post("/studentgradecard/getregistrationList", { instituteid: iid() }, enc)
+    ),
+    program: () => post("/studentgradecard/getstudentinfo", { instituteid: iid() }, enc),
+    // gc_info.json
+    /** program = program().studentinfo */
+    gradeCard: (sem, program) => orEmpty(
+      { gradecard: [] },
+      // gradecard_2026EVESEM.json
+      post("/studentgradecard/showstudentgradecard", {
+        instituteid: iid(),
+        registrationid: sem.registrationid,
+        branchid: program.branchid,
+        programid: program.programid
+      }, enc)
+    ),
+    /** sgpa/cgpa for every finished semester; stynumber = current semester number */
+    semesterResults: (stynumber) => orEmpty(
+      { semesterList: [] },
+      // sgpa_all.json
+      post("/studentsgpacgpa/getallsemesterdata", { instituteid: iid(), studentid: session().memberId, stynumber }, enc)
+    ),
+    // me
+    personalInfo: () => post("/studentpersinfo/getstudent-personalinformation", { instituteid: iid() }),
+    // personal.json
+    bankInfo: () => post("/studentbankdetails/getstudentbankinfo", { instituteid: iid() }, enc),
+    // bank.json
+    hostel: () => orEmpty(null, post("/myhostelallocationdetail/gethostelallocationdetail", { instituteid: iid() })),
+    // hostel.json
+    fees: () => orEmpty(null, post("/studentfeeledger/loadfeesummary", { instituteid: iid() })),
+    // fees.json
+    // registration, read only
+    choiceSemesters: () => orEmpty({ registrationcodelist: [] }, post("/studentchoiceprint/getsemestercodelist", {}, enc)),
+    // choice_sems.json
+    subjectChoices: (sem) => orEmpty(
+      { subjectpreferencegrid: [] },
+      // choices.json
+      post("/studentchoiceprint/getsubjectpreference", { instituteid: iid(), clientid: session().clientId, registrationid: sem.registrationid }, enc)
+    ),
+    moocSemesters: () => orEmpty([], post("/moocsubjectstatus/getsemestercodelist", { instituteid: iid() })),
+    // mooc_sems.json
+    moocStatus: (sem) => orEmpty(null, post("/moocsubjectstatus/getsubjectstatus", { instituteid: iid(), registrationid: sem.registrationid }))
+    // mooc_status.json
+  };
+
+  // src/core/google.js
+  var LOGIN_URL = "https://webportal.jiit.ac.in:6013/CLXSSOAPI/token/generate-token-google-signin";
+  var config = null;
+  function loadConfig() {
+    config ??= (async () => {
+      let body = null;
+      try {
+        const res = await fetch(BASE + "/token/getlogoClientWise", {
+          headers: { "Content-Type": "application/json", Accept: "application/json, text/plain, */*", Authorization: "Bearer" }
+        });
+        body = await res.json();
+      } catch {
+      }
+      if (!body?.response) throw new PortalError("network", "Can't reach the portal");
+      return body.response;
+    })().catch((e) => {
+      config = null;
+      throw e;
+    });
+    return config;
+  }
+  function gsi() {
+    return new Promise((resolve, reject) => {
+      const ready = () => window.google?.accounts?.id;
+      if (ready()) return resolve(ready());
+      if (!document.querySelector('script[src*="accounts.google.com/gsi/client"]')) {
+        document.head.append(Object.assign(document.createElement("script"), { src: "https://accounts.google.com/gsi/client", async: true }));
+      }
+      let tries = 0;
+      const id = setInterval(() => {
+        if (ready()) {
+          clearInterval(id);
+          resolve(ready());
+        } else if (++tries > 100) {
+          clearInterval(id);
+          reject(new PortalError("network", "Google sign-in didn't load"));
+        }
+      }, 100);
+    });
+  }
+  async function exchange2(credential, url) {
+    let res;
+    try {
+      res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json, text/plain, */*" },
+        body: JSON.stringify({ googleToken: credential, modulename: "studentportal" })
+      });
+    } catch {
+      throw new PortalError("network", "Can't reach the portal");
+    }
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+    }
+    const r = body?.response?.regdata || body?.response;
+    if (body?.status?.responseStatus !== "Success" || !r?.token) {
+      throw new PortalError("portal", body?.status?.errors?.[0] || "The portal didn't sign you in");
+    }
+    adoptLogin(r);
+    return r;
+  }
+  async function googleButton(el, { dark = false, width = 320, onSignedIn, onError } = {}) {
+    const [cfg, id] = await Promise.all([loadConfig(), gsi()]);
+    if (cfg?.loadGoogleButtonShow !== "Y" || !cfg.loadGoogleClientId) {
+      throw new PortalError("portal", "The portal has Google sign-in switched off");
+    }
+    id.initialize({
+      client_id: cfg.loadGoogleClientId,
+      ux_mode: "popup",
+      callback: async (r) => {
+        try {
+          onSignedIn?.(await exchange2(r.credential, cfg.URLapiBase || LOGIN_URL));
+        } catch (e) {
+          onError?.(e);
+        }
+      }
+    });
+    id.renderButton(el, {
+      theme: dark ? "filled_black" : "outline",
+      size: "large",
+      shape: "pill",
+      text: "continue_with",
+      logo_alignment: "left",
+      width: Math.round(Math.min(400, width))
+    });
+  }
+
   // src/ui/components.js
   function icon(name, size = 24, extra = {}) {
     const ic = ICONS[name];
@@ -607,7 +1021,7 @@
       action || null
     );
   }
-  function signInAgain() {
+  function portalSignIn() {
     try {
       localStorage.setItem("Token", "");
       const cap = JSON.parse(localStorage.getItem("jp:login") || "{}");
@@ -617,15 +1031,72 @@
     }
     location.href = "/studentportal/";
   }
+  var signInOpen = false;
+  function openSignIn() {
+    if (signInOpen) return;
+    signInOpen = true;
+    const button = h("div");
+    const wait = spinner();
+    const slot2 = h("div", { class: "gbtn" }, button, wait);
+    const status2 = h("div", { class: "body-md muted", style: { minHeight: "20px", textAlign: "center" } });
+    const close = sheet(
+      h("div", { class: "title-lg" }, "Sign in again"),
+      h(
+        "p",
+        { class: "body-md muted", style: { margin: "8px 0 20px" } },
+        "Your portal session ran out. Your saved data stays here while you sign in."
+      ),
+      slot2,
+      status2,
+      h(
+        "div",
+        { style: { textAlign: "center", marginTop: "8px" } },
+        h("button", { class: "btn text", onclick: portalSignIn }, "Use the portal's sign-in page instead")
+      )
+    );
+    const done = () => {
+      signInOpen = false;
+    };
+    const panel = slot2.closest(".sheet");
+    new MutationObserver((_, obs) => {
+      if (!panel.isConnected) {
+        obs.disconnect();
+        done();
+      }
+    }).observe(panel.parentNode, { childList: true });
+    const host = document.getElementById("jportal-root");
+    googleButton(button, {
+      dark: host?.getAttribute("data-theme") === "dark",
+      width: Math.min(360, (panel.clientWidth || 360) - 40),
+      onSignedIn: () => {
+        render(status2, "Signed in, loading\u2026");
+        close();
+        location.reload();
+      },
+      onError: (e) => render(status2, e?.message || "Couldn't sign you in")
+    }).then(() => wait.remove()).catch((e) => {
+      render(slot2);
+      render(status2, `${e?.message || "Google sign-in didn't load"}. Use the portal's sign-in page below.`);
+    });
+  }
   function errorState(err, retry) {
     const expired = err?.kind === "expired";
     return emptyState(
       expired ? "Signed out" : "Couldn't load this",
-      expired ? "Your portal session ran out. Sign in again on the portal." : err?.message || String(err),
-      expired ? h("button", { class: "btn", onclick: signInAgain }, "Sign in") : retry ? h("button", { class: "btn tonal", onclick: retry }, icon("refresh", 18), "Retry") : null
+      expired ? "Your portal session ran out. Sign in again to see fresh numbers." : err?.message || String(err),
+      expired ? h("button", { class: "btn", onclick: openSignIn }, "Sign in") : retry ? h("button", { class: "btn tonal", onclick: retry }, icon("refresh", 18), "Retry") : null
     );
   }
   function staleBanner(err) {
+    if (err?.kind === "expired") {
+      return h(
+        "div",
+        { class: "banner" },
+        icon("wifi_off", 18),
+        h("span", null, "Showing saved data. Your session ran out."),
+        h("button", { class: "banner-act", onclick: openSignIn }, "Sign in")
+      );
+    }
     return h("div", { class: "banner" }, icon("wifi_off", 18), h("span", null, `Showing saved data. ${err?.message || ""}`));
   }
   function sheet(...content) {
@@ -639,301 +1110,6 @@
     host.append(scrim, panel);
     return close;
   }
-
-  // src/core/crypto.js
-  var IV = new TextEncoder().encode("dcek9wb8frty1pnm");
-  var IST_MS = 330 * 60 * 1e3;
-  function dateSeq(ms) {
-    const d = new Date(ms + IST_MS);
-    const dd = String(d.getUTCDate()).padStart(2, "0");
-    const mm = String(d.getUTCMonth() + 1).padStart(2, "0");
-    const yy = String(d.getUTCFullYear() % 100).padStart(2, "0");
-    return `${dd[0]}${mm[0]}${yy[0]}${d.getUTCDay()}${dd[1]}${mm[1]}${yy[1]}`;
-  }
-  var keys = /* @__PURE__ */ new Map();
-  function key(ms) {
-    const seq = dateSeq(ms);
-    if (!keys.has(seq)) {
-      const raw = new TextEncoder().encode(`qa8y${seq}ty1pn`);
-      keys.set(seq, crypto.subtle.importKey("raw", raw, { name: "AES-CBC" }, false, ["encrypt", "decrypt"]));
-    }
-    return keys.get(seq);
-  }
-  var b64 = (bytes2) => {
-    let s = "";
-    for (const b of new Uint8Array(bytes2)) s += String.fromCharCode(b);
-    return btoa(s);
-  };
-  async function encrypt(plain, ms) {
-    const out = await crypto.subtle.encrypt({ name: "AES-CBC", iv: IV }, await key(ms), new TextEncoder().encode(plain));
-    return b64(out);
-  }
-  var ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  var noise = (n) => Array.from(crypto.getRandomValues(new Uint8Array(n)), (b) => ALNUM[b % ALNUM.length]).join("");
-  var localName = (ms) => encrypt(noise(4) + dateSeq(ms) + noise(5), ms);
-
-  // src/core/api.js
-  var BASE = "https://webportal.jiit.ac.in:6011/StudentPortalAPI";
-  var PortalError = class extends Error {
-    /** kind: expired | forbidden | unavailable | server | empty | portal | malformed | network */
-    constructor(kind, message, errors = []) {
-      super(message || kind);
-      this.kind = kind;
-      this.errors = errors;
-    }
-    /** the portal's "NO ... FOUND" answers, an empty list rather than a failure */
-    get isNoData() {
-      return this.kind === "portal" && this.errors.some((e) => /\bno\b.*\bfound\b|not found|no record/i.test(e));
-    }
-  };
-  var skew = Number(localStorage.getItem("jp:skew") || 0);
-  var now2 = () => Date.now() + skew;
-  function observe(res) {
-    const d = Date.parse(res.headers.get("Date") || "");
-    if (!Number.isNaN(d)) {
-      skew = d - Date.now();
-      try {
-        localStorage.setItem("jp:skew", String(skew));
-      } catch {
-      }
-    }
-  }
-  async function exchange(path, method, body) {
-    const url = path.startsWith("https://") ? path : BASE + path;
-    const s = session();
-    let res;
-    try {
-      res = await fetch(url, {
-        method,
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json, text/plain, */*",
-          Authorization: `Bearer ${s?.token || ""}`,
-          LocalName: await localName(now2())
-        },
-        body
-      });
-    } catch (e) {
-      throw new PortalError("network", "Can't reach the portal");
-    }
-    observe(res);
-    return res;
-  }
-  async function unwrap(res) {
-    if (res.status === 401) throw new PortalError("expired", "Session expired, sign in again");
-    if (res.status === 403) throw new PortalError("forbidden", "The portal refused that");
-    const text = await res.text();
-    if (!text.trim()) {
-      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
-      if (res.status >= 400) throw new PortalError("portal", `Portal error ${res.status}`);
-      throw new PortalError("empty", "The portal sent nothing back");
-    }
-    let root;
-    try {
-      root = JSON.parse(text);
-    } catch {
-    }
-    if (!root || typeof root !== "object") {
-      if (res.status >= 500) throw new PortalError("unavailable", "The portal is down right now");
-      throw new PortalError("malformed", "Unexpected answer from the portal");
-    }
-    const st = root.status && typeof root.status === "object" ? root.status : null;
-    if (st?.responseStatus === "Success" && res.status < 400) return root.response ?? null;
-    if (res.status >= 500 && !st) {
-      const e = new PortalError("server", "The portal couldn't handle this request");
-      e.detail = `${res.status} ${root.error || ""}: ${root.message || ""}`.trim();
-      throw e;
-    }
-    const errors = Array.isArray(st?.errors) ? st.errors.filter((e) => typeof e === "string") : [];
-    throw new PortalError("portal", errors[0] || "The portal returned an error", errors);
-  }
-  var sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-  var transient = (e) => ["unavailable", "empty", "network"].includes(e.kind);
-  var refreshing = null;
-  async function refreshSession() {
-    if (globalThis.__JP_PREVIEW__) return false;
-    refreshing ??= (async () => {
-      try {
-        const tokendate = tokenDate();
-        const res = await unwrap(await exchange(
-          "/token/refreshTokenRequest",
-          "POST",
-          JSON.stringify({ username: session()?.username || "", tokendate })
-        ));
-        return res?.msg === "Success";
-      } catch {
-        return false;
-      } finally {
-        setTimeout(() => {
-          refreshing = null;
-        }, 0);
-      }
-    })();
-    return refreshing;
-  }
-  async function post(path, payload, opts = {}) {
-    try {
-      return await postOnce(path, payload, opts);
-    } catch (e) {
-      if (e instanceof PortalError && e.kind === "expired" && await refreshSession()) return postOnce(path, payload, opts);
-      throw e;
-    }
-  }
-  async function postOnce(path, payload, { encrypted = false, retry = true } = {}) {
-    const delays = retry ? [500, 1500] : [];
-    for (let attempt = 0; ; attempt++) {
-      try {
-        const before = dateSeq(now2());
-        const send = async () => {
-          const json = payload == null ? void 0 : JSON.stringify(payload);
-          const body = json && encrypted ? await encrypt(json, now2()) : json;
-          return unwrap(await exchange(path, "POST", body));
-        };
-        try {
-          return await send();
-        } catch (e) {
-          if (e.kind === "empty" && dateSeq(now2()) !== before) return await send();
-          throw e;
-        }
-      } catch (e) {
-        if (!(e instanceof PortalError) || !transient(e) || attempt >= delays.length) throw e;
-        await sleep(delays[attempt]);
-      }
-    }
-  }
-  async function bytes(path) {
-    const res = await exchange(path, "GET");
-    const type = res.headers.get("Content-Type") || "";
-    if (type.includes("json") || res.status >= 400) {
-      await unwrap(res);
-      throw new PortalError("malformed", "Expected a file, got json");
-    }
-    const buf = new Uint8Array(await res.arrayBuffer());
-    if (!buf.length) throw new PortalError("empty", "The portal sent nothing back");
-    return buf;
-  }
-  async function orEmpty(empty, p) {
-    try {
-      return await p;
-    } catch (e) {
-      if (e instanceof PortalError && e.isNoData) return empty;
-      throw e;
-    }
-  }
-  var iid = () => session().instituteId;
-  var enc = {};
-  var api = {
-    // attendance                                               fixture
-    attendanceMeta: () => (
-      // att_meta.json
-      post("/StudentClassAttendance/getstudentInforegistrationforattendence", { instituteid: iid() })
-    ),
-    attendance: (sem, stynumber) => orEmpty(
-      { studentattendancelist: [] },
-      // att_detail_2026ODDSEM.json
-      post("/StudentClassAttendance/getstudentattendancedetail", {
-        instituteid: iid(),
-        registrationcode: sem.registrationcode,
-        registrationid: sem.registrationid,
-        stynumber
-      }, enc)
-    ),
-    /** subject = a studentattendancelist row; components = its subjectcomponentid(s) to include */
-    dailyAttendance: (sem, subject2, components) => orEmpty(
-      { studentAttdsummarylist: [] },
-      // daily_*.json
-      post("/StudentClassAttendance/getstudentsubjectpersentage", {
-        instituteid: iid(),
-        subjectid: subject2.subjectid,
-        registrationid: sem.registrationid,
-        cmpidkey: components.map((c) => ({ subjectcomponentid: c })),
-        // a raw attendance row's subjectcode is "NAME(CODE)", the portal wants the bare code
-        subjectcode: subject2.individualsubjectcode || subject2.subjectcode,
-        registrationcode: sem.registrationcode
-      }, enc)
-    ),
-    // subjects
-    subjectSemesters: () => post("/reqsubfaculty/getregistrationList", { instituteid: iid() }, enc),
-    // gc_regs.json shape
-    registeredSubjects: (sem) => orEmpty(
-      { registrations: [] },
-      // faculties.json
-      post("/reqsubfaculty/getfaculties", { studentid: session().memberId, instituteid: iid(), registrationid: sem.registrationid }, enc)
-    ),
-    credits: () => post("/feedbackformcontroller/getCreadits", { enrollmentNo: session().enrollmentNo }),
-    // credits.json
-    // exams
-    examSemesters: () => orEmpty(
-      { semesterCodeinfo: { semestercode: [] } },
-      // exam_sems.json
-      post("/studentcommonsontroller/getsemestercode-withstudentexamevents", { clientid: session().clientId, instituteid: iid() }, enc)
-    ),
-    examEvents: (sem) => orEmpty(
-      { eventcode: { examevent: [] } },
-      // exam_events.json
-      post("/studentcommonsontroller/getstudentexamevents", { instituteid: iid(), registationid: sem.registrationid }, enc)
-    ),
-    /** event = an exam event row (exameventid, registrationid) */
-    examSchedule: (event2) => orEmpty(
-      { subjectinfo: [] },
-      // exam_schedule.json
-      post("/studentsttattview/getstudent-examschedule", { instituteid: iid(), exameventid: event2.exameventid, registrationid: event2.registrationid }, enc)
-    ),
-    // marks
-    marksSemesters: () => orEmpty(
-      { semestercode: [] },
-      // marks_sems.json
-      post("/studentcommonsontroller/getsemestercode-exammarks", { instituteid: iid() }, enc)
-    ),
-    marksPdf: (sem) => bytes(`/studentsexamview/printstudent-exammarks/${iid()}/${sem.registrationid}/${sem.registrationcode}`),
-    // marks/*.pdf
-    // grades
-    gradeCardSemesters: () => orEmpty(
-      { registrations: [] },
-      // gc_regs.json
-      post("/studentgradecard/getregistrationList", { instituteid: iid() }, enc)
-    ),
-    program: () => post("/studentgradecard/getstudentinfo", { instituteid: iid() }, enc),
-    // gc_info.json
-    /** program = program().studentinfo */
-    gradeCard: (sem, program) => orEmpty(
-      { gradecard: [] },
-      // gradecard_2026EVESEM.json
-      post("/studentgradecard/showstudentgradecard", {
-        instituteid: iid(),
-        registrationid: sem.registrationid,
-        branchid: program.branchid,
-        programid: program.programid
-      }, enc)
-    ),
-    /** sgpa/cgpa for every finished semester; stynumber = current semester number */
-    semesterResults: (stynumber) => orEmpty(
-      { semesterList: [] },
-      // sgpa_all.json
-      post("/studentsgpacgpa/getallsemesterdata", { instituteid: iid(), studentid: session().memberId, stynumber }, enc)
-    ),
-    // me
-    personalInfo: () => post("/studentpersinfo/getstudent-personalinformation", { instituteid: iid() }),
-    // personal.json
-    bankInfo: () => post("/studentbankdetails/getstudentbankinfo", { instituteid: iid() }, enc),
-    // bank.json
-    hostel: () => orEmpty(null, post("/myhostelallocationdetail/gethostelallocationdetail", { instituteid: iid() })),
-    // hostel.json
-    fees: () => orEmpty(null, post("/studentfeeledger/loadfeesummary", { instituteid: iid() })),
-    // fees.json
-    // registration, read only
-    choiceSemesters: () => orEmpty({ registrationcodelist: [] }, post("/studentchoiceprint/getsemestercodelist", {}, enc)),
-    // choice_sems.json
-    subjectChoices: (sem) => orEmpty(
-      { subjectpreferencegrid: [] },
-      // choices.json
-      post("/studentchoiceprint/getsubjectpreference", { instituteid: iid(), clientid: session().clientId, registrationid: sem.registrationid }, enc)
-    ),
-    moocSemesters: () => orEmpty([], post("/moocsubjectstatus/getsemestercodelist", { instituteid: iid() })),
-    // mooc_sems.json
-    moocStatus: (sem) => orEmpty(null, post("/moocsubjectstatus/getsubjectstatus", { instituteid: iid(), registrationid: sem.registrationid }))
-    // mooc_status.json
-  };
 
   // src/screens/attendance/common.js
   var META_KEY = "att:meta";
@@ -5442,6 +5618,8 @@ input, select { font: inherit; color: inherit; }
 .scrim { position: absolute; inset: 0; background: rgba(0,0,0,.4); z-index: 20; animation: jp-fade .2s; }
 .sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 21; background: var(--sc-low); border-radius: var(--r-lg) var(--r-lg) 0 0; padding: 12px 20px calc(var(--safe-b) + 24px); max-height: 85%; overflow-y: auto; animation: jp-up .25s cubic-bezier(.2,.8,.2,1); }
 .sheet .grip { width: 32px; height: 4px; border-radius: 2px; background: var(--outline); margin: 0 auto 16px; opacity: .6; }
+.gbtn { display: flex; justify-content: center; min-height: 44px; margin-bottom: 8px; }
+.banner-act { margin-left: auto; flex: none; font: inherit; font-weight: 600; color: inherit; text-decoration: underline; padding: 4px 0 4px 8px; }
 @keyframes jp-fade { from { opacity: 0; } }
 @keyframes jp-up { from { transform: translateY(100%); } }
 
@@ -5548,6 +5726,13 @@ input, select { font: inherit; color: inherit; }
     }
     addEventListener("popstate", () => {
       if (stack.length) nav.back();
+    });
+    let asked = false;
+    addEventListener("jp:signin", () => {
+      if (!asked) {
+        asked = true;
+        openSignIn();
+      }
     });
     app2.append(navBar);
     let start2 = startTab;
